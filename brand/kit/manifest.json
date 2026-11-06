@@ -1,0 +1,86 @@
+[
+  {
+    "name": "stem-icon-dark-transparent",
+    "theme": "dark",
+    "background": "transparent",
+    "width": 1024,
+    "height": 1024
+  },
+  {
+    "name": "stem-icon-dark-solid",
+    "theme": "dark",
+    "background": "solid",
+    "width": 1024,
+    "height": 1024
+  },
+  {
+    "name": "stem-wordmark-dark-transparent",
+    "theme": "dark",
+    "background": "transparent",
+    "width": 2048,
+    "height": 1435
+  },
+  {
+    "name": "stem-wordmark-dark-solid",
+    "theme": "dark",
+    "background": "solid",
+    "width": 2048,
+    "height": 1435
+  },
+  {
+    "name": "stem-lockup-dark-transparent",
+    "theme": "dark",
+    "background": "transparent",
+    "width": 2048,
+    "height": 890
+  },
+  {
+    "name": "stem-lockup-dark-solid",
+    "theme": "dark",
+    "background": "solid",
+    "width": 2048,
+    "height": 890
+  },
+  {
+    "name": "stem-icon-light-transparent",
+    "theme": "light",
+    "background": "transparent",
+    "width": 1024,
+    "height": 1024
+  },
+  {
+    "name": "stem-icon-light-solid",
+    "theme": "light",
+    "background": "solid",
+    "width": 1024,
+    "height": 1024
+  },
+  {
+    "name": "stem-wordmark-light-transparent",
+    "theme": "light",
+    "background": "transparent",
+    "width": 2048,
+    "height": 1435
+  },
+  {
+    "name": "stem-wordmark-light-solid",
+    "theme": "light",
+    "background": "solid",
+    "width": 2048,
+    "height": 1435
+  },
+  {
+    "name": "stem-lockup-light-transparent",
+    "theme": "light",
+    "background": "transparent",
+    "width": 2048,
+    "height": 890
+  },
+  {
+    "name": "stem-lockup-light-solid",
+    "theme": "light",
+    "background": "solid",
+    "width": 2048,
+    "height": 890
+  }
+]

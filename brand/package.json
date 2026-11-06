@@ -1,0 +1,19 @@
+{
+  "name": "stem-brand",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "bun build-kit.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "opentype.js": "^2.0.0",
+    "sharp": "^0.35.5"
+  }
+}
