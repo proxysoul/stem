@@ -1,0 +1,12 @@
+{
+  "name": "Any OpenAI chat endpoint, through a script",
+  "protocol": "command",
+  "command": [
+    "bun",
+    "./openai-chat.ts"
+  ],
+  "env": [],
+  "models": [
+    "gpt-5-mini"
+  ]
+}

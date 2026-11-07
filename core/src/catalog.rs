@@ -12,6 +12,8 @@ const REVALIDATE_AFTER: Duration = Duration::from_secs(600);
 pub enum Protocol {
     Anthropic,
     OpenAiChat,
+    OpenAiResponses,
+    Command,
     ClaudeCode,
     ClaudeNative,
 }
@@ -61,6 +63,7 @@ pub struct Catalog {
     index: Value,
     loaded: RefCell<HashMap<String, Rc<Value>>>,
     pub source: String,
+    pub graft_problems: Vec<String>,
 }
 
 fn cache_dir() -> PathBuf {
@@ -117,7 +120,9 @@ impl Catalog {
                     index,
                     loaded: RefCell::default(),
                     source: "models.dev (fetched)".into(),
-                })
+                    graft_problems: Vec::new(),
+                }
+                .grafted())
             }
             other if has_index => {
                 let _ = other;
@@ -140,7 +145,29 @@ impl Catalog {
             index,
             loaded: RefCell::default(),
             source: source.into(),
-        })
+            graft_problems: Vec::new(),
+        }
+        .grafted())
+    }
+
+    fn grafted(mut self) -> Catalog {
+        let (grafts, problems) = crate::graft::load();
+        self.graft_problems = problems;
+        for g in grafts {
+            let ids: Vec<Value> = g.entry["models"].as_object().into_iter().flatten().map(|(k, _)| Value::String(k.clone())).collect();
+            if let Some(index) = self.index.as_object_mut() {
+                index.insert(
+                    g.id.clone(),
+                    serde_json::json!({"name": g.entry["name"], "env": g.entry["env"], "api": g.entry["api"], "protocol": g.entry["protocol"], "graft": g.path.display().to_string(), "gateway": false, "models": ids}),
+                );
+            }
+            self.loaded.borrow_mut().insert(g.id, Rc::new(g.entry));
+        }
+        self
+    }
+
+    pub fn grafts(&self) -> Vec<(String, Value)> {
+        self.providers().filter(|(_, p)| p["graft"].is_string()).map(|(id, p)| (id.clone(), p.clone())).collect()
     }
 
     fn providers(&self) -> impl Iterator<Item = (&String, &Value)> {
@@ -238,6 +265,7 @@ impl Catalog {
         })?;
         let (key_source, key) = match std::env::var("STEM_API_KEY") {
             Ok(k) if !k.is_empty() => ("STEM_API_KEY".to_string(), k),
+            _ if provider["graft"].is_string() && env_names(&provider).is_empty() => ("no key needed".to_string(), String::new()),
             _ => key_for(&provider).ok_or_else(|| {
                 format!(
                     "{provider_id} needs one of {} to be set (in ~/.stem/.env or the shell)",
@@ -252,9 +280,20 @@ impl Catalog {
                 && let Some(origin_model) = origin_provider["models"].get(id) {
                     fill_missing(&mut model, &model_info(origin_model));
                 }
-        let base_url = provider["api"]
-            .as_str()
-            .map(str::to_string)
+        if provider["graft"].is_string() && model.context == 0 {
+            let origin = self
+                .providers()
+                .filter(|(id, p)| *id != provider_id && !p["graft"].is_string() && has_model(p, model_id))
+                .find_map(|(id, _)| self.full(id).map(|full| model_info(&full["models"][model_id])).filter(|m| m.context > 0));
+            if let Some(origin) = origin {
+                fill_missing(&mut model, &origin);
+                if model.name.is_empty() {
+                    model.name = origin.name;
+                }
+            }
+        }
+        let base_url = if protocol == Protocol::Command { provider["graft"].as_str().map(str::to_string) } else { None }
+            .or_else(|| provider["api"].as_str().map(str::to_string))
             .or_else(|| default_base(provider_id, protocol))
             .ok_or_else(|| format!("models.dev gives no API address for {provider_id}"))?;
         Ok(Resolved {
@@ -463,10 +502,27 @@ fn key_for(provider: &Value) -> Option<(String, String)> {
         .find_map(|name| std::env::var(&name).ok().filter(|v| !v.is_empty()).map(|v| (name, v)))
 }
 
+pub fn protocol_named(name: &str) -> Option<Protocol> {
+    match name {
+        "anthropic" => Some(Protocol::Anthropic),
+        "chat" | "openai" | "openai-chat" => Some(Protocol::OpenAiChat),
+        "responses" | "openai-responses" => Some(Protocol::OpenAiResponses),
+        "command" => Some(Protocol::Command),
+        _ => None,
+    }
+}
+
 fn protocol_of(provider: &Value) -> Option<Protocol> {
+    if let Some(p) = std::env::var("STEM_PROTOCOL").ok().as_deref().and_then(protocol_named) {
+        return Some(p);
+    }
+    if let Some(p) = provider["protocol"].as_str() {
+        return protocol_named(p);
+    }
     match provider["npm"].as_str()? {
         "@ai-sdk/anthropic" => Some(Protocol::Anthropic),
-        "@ai-sdk/openai-compatible" | "@ai-sdk/openai" | "@openrouter/ai-sdk-provider" => Some(Protocol::OpenAiChat),
+        "@ai-sdk/openai" => Some(Protocol::OpenAiResponses),
+        "@ai-sdk/openai-compatible" | "@openrouter/ai-sdk-provider" => Some(Protocol::OpenAiChat),
         _ if provider["api"].is_string() => Some(Protocol::OpenAiChat),
         _ => None,
     }

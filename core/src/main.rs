@@ -5,10 +5,14 @@ mod claude_native;
 mod config;
 mod env;
 mod events;
+mod hook;
+mod integrate;
 mod facts;
 mod growth;
+mod graft;
 mod guard;
 mod host;
+mod learn;
 mod llm;
 mod lsp;
 mod project;
@@ -48,11 +52,17 @@ const HELP: &str = "stem: a tiny coding engine that grows with your project
   stem                      open the input
   stem \"fix the failing test\"  run one task and print the answer
   stem models [filter]      models you can use, live from models.dev
+  stem learn <request>      show what Stem would tell the model at the start of that request
+  stem learn feedback <text>  tell Stem what was wrong with its last fix; it brings this up when that code or request comes back
+  stem learn                between sessions: check how this project's tests run on a clean checkout and remember it
+  stem grafts               your own providers and agents, plugged in from ~/.stem/grafts or .stem/grafts
   stem stats                cost, tokens, cache and scripts for this project
   stem doctor               show the model, key, project and language servers Stem picks
   stem tools                functions this project grew: uses, failures, age, and the dropped ones with why
   stem js [file]            run one script against $ (from the file or stdin) and print its result
-  stem mcp                  serve Stem as one MCP tool over stdio, for other harnesses
+  stem mcp                  serve Stem over MCP (stdio) for Claude Code, Codex, OpenCode, Empryo, pi
+  stem integrate [harness]  wire Stem into claude, codex, opencode, pi, empryo (default: all) for this project
+  stem hook prompt|stop     lifecycle hook: reads the host's JSON on stdin; prompt prints what Stem knows, stop learns from the git diff
   stem login claude         sign in with your Claude plan (through Claude Code) and use it
   stem login claude-native  sign in with your Claude plan directly (no Claude Code needed); alias claude-n
 
@@ -68,6 +78,7 @@ In the input, type / to see commands:
   /login claude   sign in with your Claude plan and switch to it
   /login claude-native   the same without Claude Code (alias claude-n)
   /cache 1h       Anthropic prompt cache TTL: 5m (default) or 1h
+  /compact        eject finished steps to files (the model picks; $.recall brings them back)
   /new            new conversation     /cost  cost and cache     /exit  quit
 
 Keys go in ~/.stem/.env or the project's .env, for example ANTHROPIC_API_KEY=...
@@ -84,7 +95,7 @@ fn parse_args() -> Args {
             "-y" | "--yolo" => args.yolo = true,
             "-h" | "--help" => args.command = Some("help".into()),
             "-V" | "--version" => args.command = Some("version".into()),
-            _ if args.rest.is_empty() && args.command.is_none() && matches!(a.as_str(), "models" | "stats" | "doctor" | "js" | "mcp" | "tools" | "login") => args.command = Some(a),
+            _ if args.rest.is_empty() && args.command.is_none() && matches!(a.as_str(), "models" | "grafts" | "learn" | "stats" | "doctor" | "js" | "mcp" | "tools" | "login" | "hook" | "integrate") => args.command = Some(a),
             _ => args.rest.push(a),
         }
     }
@@ -107,8 +118,13 @@ fn apply_config(args: &mut Args) {
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        eprintln!("\nstem crashed: {info}\nPlease report this at https://github.com/proxysoul/stem/issues with the line above.");
+    }));
     let mut args = parse_args();
     let root = args.dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let _ = graft::ROOT.set(root.clone());
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     env::load_dotenv(&root);
     apply_config(&mut args);
@@ -125,6 +141,25 @@ fn main() {
             0
         }
         Some("models") => models(args.rest.first().map(String::as_str)),
+        Some("grafts") => grafts(),
+        Some("learn") if args.rest.first().map(String::as_str) == Some("feedback") => {
+            let mut learn = learn::Learn::open(&root);
+            println!("{}", serde_json::to_string_pretty(&learn.add_feedback(&args.rest[1..].join(" "))).unwrap_or_default());
+            0
+        }
+        Some("learn") if !args.rest.is_empty() => {
+            let mut host = host::Host::new(root.clone(), ui::Board::new(), Arc::new(AtomicBool::new(false)), None, Arc::new(AtomicBool::new(true)), None);
+            host.learn.preview = true;
+            match host.start_note(&args.rest.join(" ")).note {
+                Some(n) => println!("{n}"),
+                None => println!("nothing learned yet that matches this request"),
+            }
+            0
+        }
+        Some("learn") => {
+            println!("{}", serde_json::to_string_pretty(&learn::calibrate(&root)).unwrap_or_default());
+            0
+        }
         Some("stats") => stats(&root),
         Some("doctor") => doctor(&args, &root),
         Some("js") => js(&args, &root),
@@ -139,6 +174,8 @@ fn main() {
             0
         }
         Some("mcp") => mcp(&args, &root),
+        Some("integrate") => integrate::run(&args.rest, &root),
+        Some("hook") => hook::run(args.rest.first().map(String::as_str).unwrap_or("")),
         Some("login") => match login(args.rest.first().map(String::as_str)) {
             Ok(_) => {
                 eprintln!("{}", ui::accent("signed in with Claude; Stem now uses your Claude plan (saved)"));
@@ -428,7 +465,8 @@ struct StemCompleter {
     efforts: Arc<Mutex<Vec<String>>>,
 }
 
-const COMMANDS: [(&str, &str); 12] = [
+const COMMANDS: [(&str, &str); 13] = [
+    ("/compact", "eject finished steps to files; the model picks which"),
     ("/status", "project, code intelligence, cache, memory"),
     ("/model ", "pick a model: type part of its name"),
     ("/effort ", "reasoning effort for this model"),
@@ -581,6 +619,11 @@ fn repl(mut session: Session, root: &std::path::Path, presses: Arc<AtomicU64>, y
                         yolo.store(on, Ordering::SeqCst);
                         config::Config::update(|c| c.yolo = on);
                         eprintln!("{}", if on { ui::amber("yolo on: destructive steps run without asking") } else { ui::accent("approvals on: Stem asks before destructive steps") });
+                        continue;
+                    }
+                    "/compact" => {
+                        let (line, cost) = session.compact_now();
+                        eprintln!("{}", ui::dim(&format!("{line} · ${cost:.4}")));
                         continue;
                     }
                     "/status" => {
@@ -908,6 +951,132 @@ fn js(args: &Args, root: &std::path::Path) -> i32 {
     if is_error { 1 } else { 0 }
 }
 
+const MCP_VERSIONS: [&str; 4] = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"];
+
+fn mcp_tools(root: &std::path::Path, learned: &[String]) -> Vec<Value> {
+    use serde_json::json;
+    let wanted: Option<Vec<String>> = std::env::var("STEM_MCP_TOOLS").ok().map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).filter(|w: &Vec<String>| !w.is_empty());
+    let js = format!(
+        "Stem: run one JavaScript block against the project at {}, with one object, $. The block is the body of an async function. Chain as many $ calls as you need and return a small result: only the return value and console.log lines come back, so read, filter and decide inside the script.\n\n{}\n{}{}",
+        root.display(),
+        agent::SCRIPTS_DOC,
+        agent::MORE_DOC,
+        if learned.is_empty() { String::new() } else { format!("\nLearned in this project:\n{}", learned.join("\n")) }
+    );
+    let read_only = json!({"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false});
+    let writes = json!({"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false});
+    let rows = |item: Value| json!({"type": "object", "properties": {"rows": {"type": "array", "items": item}}, "required": ["rows"]});
+    let location = json!({"type": "object", "properties": {"file": {"type": "string"}, "line": {"type": "integer"}, "text": {"type": "string"}, "caller": {"type": "string"}, "of": {"type": "string"}}, "required": ["file", "line"]});
+    let target = json!({"type": "object", "properties": {
+        "name": {"type": "string", "description": "symbol name"},
+        "file": {"type": "string", "description": "optional: file of one exact place, with line"},
+        "line": {"type": "integer", "description": "optional: 1-based line of that place"}
+    }, "required": ["name"]});
+    let all = vec![
+        json!({"name": "js", "title": "Run a Stem script", "description": js, "annotations": writes,
+               "inputSchema": {"type": "object", "properties": {"code": {"type": "string", "description": "body of an async JavaScript function using $"}}, "required": ["code"]},
+               "outputSchema": {"type": "object", "properties": {"result": {"description": "the script's return value"}, "error": {"type": "string"}, "log": {"type": "array", "items": {"type": "string"}}}}}),
+        json!({"name": "defs", "title": "Definitions", "description": "Where a symbol is defined, from the language server (falls back to the tree-sitter index). Pass file and line to pick one exact place when a name has several.", "annotations": read_only, "inputSchema": target, "outputSchema": rows(location.clone())}),
+        json!({"name": "refs", "title": "References", "description": "Every place a symbol is used, from the language server: semantic, not text matches.", "annotations": read_only, "inputSchema": target, "outputSchema": rows(location.clone())}),
+        json!({"name": "callers", "title": "Callers", "description": "Functions that call a symbol, each with the caller's name, from the language server's call hierarchy.", "annotations": read_only, "inputSchema": target, "outputSchema": rows(location.clone())}),
+        json!({"name": "impls", "title": "Implementations", "description": "Concrete implementations of an interface, trait or abstract method.", "annotations": read_only, "inputSchema": target, "outputSchema": rows(location.clone())}),
+        json!({"name": "symbols", "title": "Find symbols", "description": "Symbols whose name matches a query across the project (functions, classes, types, constants).", "annotations": read_only,
+               "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+               "outputSchema": rows(json!({"type": "object", "properties": {"file": {"type": "string"}, "line": {"type": "integer"}, "text": {"type": "string"}, "kind": {"type": "string"}}}))}),
+        json!({"name": "sql", "title": "Query code facts", "description": "Read-only SQL over Stem's fact store, kept current before every query. Tables: files(path, lang, size, mtime, lines) · symbols(file, name, kind, line, end_line, doc) · refs(file, name, kind, line) · commits(hash, date, author, subject) · commit_files(hash, path) · cochange(a, b, n) files changed together n times. Use ? placeholders.", "annotations": read_only,
+               "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "params": {"type": "array", "items": {}}}, "required": ["query"]},
+               "outputSchema": rows(json!({"type": "object"}))}),
+        json!({"name": "diagnostics", "title": "Diagnostics", "description": "Errors and warnings from the language server, for one file or every open file.", "annotations": read_only,
+               "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}},
+               "outputSchema": rows(json!({"type": "object", "properties": {"file": {"type": "string"}, "line": {"type": "integer"}, "text": {"type": "string"}, "severity": {"type": "string"}}}))}),
+        json!({"name": "task", "title": "Hand a task to Stem", "description": "Stem works on a task end to end with its own model and its learned knowledge of this project, then returns its final answer, the files it changed and what it cost. Use it for self-contained investigations or fixes you want done cheaply in the background of your own work. Stem refuses destructive steps here.", "annotations": writes,
+               "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string"}, "model": {"type": "string", "description": "optional provider/model for Stem, e.g. anthropic/claude-haiku-5-5"}}, "required": ["prompt"]},
+               "outputSchema": {"type": "object", "properties": {"answer": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "cost": {"type": "number"}, "steps": {"type": "integer"}, "seconds": {"type": "number"}, "error": {"type": "string"}}, "required": ["answer", "files"]}}),
+        json!({"name": "brief", "title": "What Stem learned", "description": "Call first with the user's request. Returns what Stem learned in this project that applies to it, checked against the current code: files that earlier work on similar requests changed, an earlier fix that has been undone, feedback on a rejected fix, an earlier answer to the same question whose files are unchanged, or a session that stopped halfway. Empty when nothing applies. Starts tracking the request for remember.", "annotations": read_only,
+               "inputSchema": {"type": "object", "properties": {"request": {"type": "string"}}, "required": ["request"]},
+               "outputSchema": {"type": "object", "properties": {"note": {"type": ["string", "null"]}}}}),
+        json!({"name": "remember", "title": "Learn from this request", "description": "Call when the request is done. Stem learns from the changes in the working tree since brief (git diff) and from your final answer, so later requests in this project start better.", "annotations": writes,
+               "inputSchema": {"type": "object", "properties": {"answer": {"type": "string", "description": "your final answer"}, "finished": {"type": "boolean", "description": "false if you stopped before finishing"}}},
+               "outputSchema": {"type": "object"}}),
+        json!({"name": "feedback", "title": "Feedback on the last change", "description": "Tell Stem what was wrong with the last change (a failing CI test, a review comment). It comes back when that code or a similar request does, and that change is never offered again as a fix.", "annotations": writes,
+               "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+               "outputSchema": {"type": "object"}}),
+    ];
+    all.into_iter().filter(|t| wanted.as_ref().is_none_or(|w| w.iter().any(|n| t["name"].as_str() == Some(n.as_str())))).collect()
+}
+
+fn git_changed(root: &std::path::Path) -> Vec<String> {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.get(3..).map(str::to_string)).filter(|p| !p.starts_with(".stem/")).collect())
+        .unwrap_or_default()
+}
+
+fn mcp_task(root: &std::path::Path, prompt: &str, model: Option<&str>) -> Value {
+    let before = git_changed(root);
+    let started = std::time::Instant::now();
+    let session = Catalog::load().and_then(|catalog| {
+        let resolved = catalog.resolve(model)?;
+        let ask = ask_client(&catalog, &resolved);
+        Session::new(Client::new(resolved), ask, root.to_path_buf(), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), None)
+    });
+    let mut session = match session {
+        Ok(s) => s,
+        Err(e) => return serde_json::json!({"answer": "", "files": [], "error": e}),
+    };
+    let report = session.turn(prompt);
+    let files: Vec<String> = git_changed(root).into_iter().filter(|f| !before.contains(f)).collect();
+    let mut out = serde_json::json!({"answer": report.answer, "files": files, "cost": report.cost, "steps": report.scripts, "seconds": started.elapsed().as_secs_f64()});
+    if let Some(e) = report.error {
+        out["error"] = serde_json::json!(e);
+    }
+    out
+}
+
+fn mcp_call(engine: &mut agent::Engine, root: &std::path::Path, session: &str, name: &str, a: &Value) -> (Value, bool) {
+    use serde_json::json;
+    let host_call = |engine: &mut agent::Engine, call: &str, args: Value| -> (Value, bool) {
+        let reply: Value = serde_json::from_str(&engine.host.borrow_mut().dispatch(call, &args.to_string())).unwrap_or(Value::Null);
+        if reply["ok"].as_bool() == Some(true) {
+            let value = reply["value"].clone();
+            (if value.is_array() { json!({"rows": value}) } else { value }, false)
+        } else {
+            (json!({"error": reply["error"].as_str().unwrap_or("failed")}), true)
+        }
+    };
+    match name {
+        "js" => {
+            let (text, is_error) = engine.run_script(a["code"].as_str().unwrap_or(""));
+            if is_error {
+                (json!({"error": text}), true)
+            } else {
+                (json!({"result": serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text))}), false)
+            }
+        }
+        "defs" | "refs" | "callers" | "impls" => {
+            let mut args = json!({"name": a["name"]});
+            if let (Some(f), Some(l)) = (a["file"].as_str(), a["line"].as_u64()) {
+                args = json!({"name": a["name"], "file": f, "line": l});
+            }
+            host_call(engine, name, args)
+        }
+        "symbols" => host_call(engine, "symbols", json!({"query": a["query"].as_str().unwrap_or("")})),
+        "sql" => host_call(engine, "sql", json!({"query": a["query"].as_str().unwrap_or(""), "params": a["params"].as_array().cloned().unwrap_or_default()})),
+        "diagnostics" => host_call(engine, "diagnostics", json!({"path": a["path"]})),
+        "task" => {
+            let out = mcp_task(root, a["prompt"].as_str().unwrap_or(""), a["model"].as_str());
+            let failed = out.get("error").is_some() && out["answer"].as_str().unwrap_or("").is_empty();
+            (out, failed)
+        }
+        "brief" => (json!({"note": hook::begin(root, session, a["request"].as_str().unwrap_or(""))}), false),
+        "remember" => (hook::end(root, session, a["answer"].as_str().unwrap_or(""), a["finished"].as_bool().unwrap_or(true)), false),
+        "feedback" => (learn::Learn::open(root).add_feedback(a["text"].as_str().unwrap_or("")), false),
+        other => (json!({"error": format!("unknown tool {other}")}), true),
+    }
+}
+
 fn mcp(args: &Args, root: &std::path::Path) -> i32 {
     use std::io::{BufRead, Write};
     let cancel = Arc::new(AtomicBool::new(false));
@@ -915,43 +1084,98 @@ fn mcp(args: &Args, root: &std::path::Path) -> i32 {
         Ok(e) => e,
         Err(e) => return fail(&e),
     };
-    let description = format!(
-        "Stem: run one JavaScript block against the project at {}. The block is the body of an async function; return a small result. Only the return value and console.log lines come back.\n\n{}",
-        root.display(),
-        agent::SCRIPTS_DOC
-    );
+    let session = format!("mcp-{}", std::process::id());
+    let info = serde_json::json!({"name": "stem", "version": env!("CARGO_PKG_VERSION")});
+    let instructions = "Stem knows this project from earlier work. Call brief with the request before you start and remember when you are done (skip both if Stem's hooks are installed). Use js to explore and change code in one script.";
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         let Some(id) = msg.get("id").cloned() else { continue };
-        let result = match msg["method"].as_str().unwrap_or("") {
-            "initialize" => serde_json::json!({
-                "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "stem", "version": env!("CARGO_PKG_VERSION")}
-            }),
+        let reply = |out: &mut std::io::Stdout, body: Value| {
+            let _ = writeln!(out, "{body}");
+            let _ = out.flush();
+        };
+        if let Some(v) = msg["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"].as_str() {
+            if !MCP_VERSIONS.contains(&v) {
+                reply(&mut out, serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32022, "message": format!("unsupported protocol version {v}"), "data": {"supported": MCP_VERSIONS}}}));
+                continue;
+            }
+        }
+        let params = &msg["params"];
+        let mut result = match msg["method"].as_str().unwrap_or("") {
+            "initialize" => {
+                let asked = params["protocolVersion"].as_str().unwrap_or("");
+                serde_json::json!({
+                    "protocolVersion": if MCP_VERSIONS.contains(&asked) { asked } else { "2025-11-25" },
+                    "capabilities": {"tools": {}},
+                    "serverInfo": info,
+                    "instructions": instructions
+                })
+            }
+            "server/discover" => serde_json::json!({"supportedVersions": MCP_VERSIONS, "capabilities": {"tools": {}}, "instructions": instructions}),
             "ping" => serde_json::json!({}),
-            "tools/list" => serde_json::json!({"tools": [{
-                "name": "js",
-                "description": description,
-                "inputSchema": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}
-            }]}),
+            "resources/list" => serde_json::json!({"resources": []}),
+            "resources/templates/list" => serde_json::json!({"resourceTemplates": []}),
+            "prompts/list" => serde_json::json!({"prompts": []}),
+            "tools/list" => {
+                let learned = engine.host.borrow().learn.prompt_lines();
+                serde_json::json!({"tools": mcp_tools(root, &learned), "ttlMs": 300000, "cacheScope": "private"})
+            }
             "tools/call" => {
-                let code = msg["params"]["arguments"]["code"].as_str().unwrap_or("");
-                let (text, is_error) = engine.run_script(code);
-                serde_json::json!({"content": [{"type": "text", "text": text}], "isError": is_error})
+                let name = params["name"].as_str().unwrap_or("");
+                let (value, is_error) = mcp_call(&mut engine, root, &session, name, &params["arguments"]);
+                let text = match (name, &value) {
+                    ("js", v) if !is_error => match &v["result"] {
+                        Value::String(s) => s.clone(),
+                        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                    },
+                    ("brief", v) => v["note"].as_str().unwrap_or("Nothing learned in this project applies to this request yet.").to_string(),
+                    (_, v) if is_error => v["error"].as_str().unwrap_or("failed").to_string(),
+                    (_, v) => serde_json::to_string_pretty(v).unwrap_or_default(),
+                };
+                let mut body = serde_json::json!({"content": [{"type": "text", "text": text}], "isError": is_error});
+                if value.is_object() && !is_error {
+                    body["structuredContent"] = value;
+                }
+                body
             }
             other => {
-                let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("unknown method {other}")}});
-                let _ = writeln!(out, "{reply}");
-                let _ = out.flush();
+                reply(&mut out, serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("unknown method {other}")}}));
                 continue;
             }
         };
-        let _ = writeln!(out, "{}", serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}));
-        let _ = out.flush();
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("resultType".into(), "complete".into());
+            obj.insert("_meta".into(), serde_json::json!({"io.modelcontextprotocol/serverInfo": info}));
+        }
+        reply(&mut out, serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}));
+    }
+    0
+}
+
+fn grafts() -> i32 {
+    let catalog = match Catalog::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let list = catalog.grafts();
+    for (id, p) in &list {
+        let models: Vec<&str> = p["models"].as_array().into_iter().flatten().filter_map(|m| m.as_str()).collect();
+        let env: Vec<&str> = p["env"].as_array().into_iter().flatten().filter_map(|m| m.as_str()).collect();
+        let key = if env.is_empty() { "no key".to_string() } else if env.iter().any(|e| std::env::var(e).is_ok_and(|v| !v.is_empty())) { format!("{} set", env.join("/")) } else { format!("needs {}", env.join(" or ")) };
+        println!("{id:<16} {:<10} {key:<24} {}", p["protocol"].as_str().unwrap_or(""), models.iter().map(|m| format!("{id}/{m}")).collect::<Vec<_>>().join("  "));
+        println!("{:<16} {}", "", ui::dim(p["graft"].as_str().unwrap_or("")));
+    }
+    for problem in &catalog.graft_problems {
+        eprintln!("skipped {problem}");
+    }
+    if list.is_empty() && catalog.graft_problems.is_empty() {
+        println!("no grafts yet. Put one JSON file per provider in {}", graft::dirs().iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(" or "));
     }
     0
 }

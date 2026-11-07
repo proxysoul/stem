@@ -107,7 +107,22 @@ fn scratch_only(args: &[String]) -> bool {
     !targets.is_empty() && targets.iter().all(|a| !a.contains("..") && (a.starts_with("/tmp/") || a.starts_with("/private/tmp/") || a.starts_with(&temp)))
 }
 
+fn nested(name: &str, args: &[String]) -> Option<String> {
+    match name {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" => {
+            let at = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c'))?;
+            args.get(at + 1).cloned()
+        }
+        "eval" => (!args.is_empty()).then(|| args.join(" ")),
+        _ => None,
+    }
+}
+
 pub fn destructive(command: &str) -> Option<String> {
+    destructive_at(command, 0)
+}
+
+fn destructive_at(command: &str, depth: usize) -> Option<String> {
     let lower = command.to_lowercase();
     for phrase in ["drop table", "drop database", "drop schema", "truncate table", "drop collection", "flushall", "flushdb"] {
         if lower.contains(phrase) {
@@ -117,6 +132,15 @@ pub fn destructive(command: &str) -> Option<String> {
     for cmd in simple_commands(command) {
         let name = program(&cmd[0]);
         let args = &cmd[1..];
+        if let Some(inner) = nested(name, args) {
+            if depth >= 4 {
+                return Some(format!("`{name}` runs a command nested too deep to check"));
+            }
+            if let Some(reason) = destructive_at(&inner, depth + 1) {
+                return Some(reason);
+            }
+            continue;
+        }
         let reason = match name {
             "rm" | "rmdir" | "unlink" if scratch_only(args) => None,
             "rm" | "rmdir" | "unlink" | "shred" | "srm" | "trash" | "del" | "rd" | "erase" => Some(format!("`{name}` deletes files")),

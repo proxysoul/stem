@@ -27,6 +27,8 @@ type Rgb = (u8, u8, u8);
 
 const LEAF: Rgb = (108, 210, 138);
 const LEAF_GLOW: Rgb = (196, 255, 210);
+const AMBER: Rgb = (242, 182, 88);
+const AMBER_GLOW: Rgb = (255, 226, 170);
 const TRACK: Rgb = (70, 84, 92);
 const NUCLEUS: Rgb = (214, 92, 146);
 const FAILED: Rgb = (255, 107, 107);
@@ -80,6 +82,9 @@ struct State {
     servers: Vec<(String, ServerState)>,
     usage: Option<crate::sys::Usage>,
     sampled: Option<Instant>,
+    banner: Option<String>,
+    context: Option<u64>,
+    ejected: (usize, usize),
 }
 
 #[derive(Clone)]
@@ -113,7 +118,16 @@ pub fn clock(d: Duration) -> String {
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
+pub fn tokens(n: usize) -> String {
+    if n < 1000 { format!("{n}") } else if n < 10_000 { format!("{:.1}k", n as f32 / 1000.0) } else { format!("{}k", n / 1000) }
+}
+
 fn bar(fraction: Option<f32>, t: f32, truecolor: bool) -> String {
+    bar_in(fraction, t, truecolor, LEAF)
+}
+
+fn bar_in(fraction: Option<f32>, t: f32, truecolor: bool, tint: Rgb) -> String {
+    let glow_tint = if tint == LEAF { LEAF_GLOW } else { AMBER_GLOW };
     let mut out = String::new();
     match fraction {
         Some(f) => {
@@ -123,9 +137,9 @@ fn bar(fraction: Option<f32>, t: f32, truecolor: bool) -> String {
             for i in 0..BAR {
                 let glow = (1.0 - ((i as f32 - shimmer).abs() / 3.0)).max(0.0);
                 if i < full {
-                    out.push_str(&paint(mix(LEAF, LEAF_GLOW, glow * 0.8), "━", truecolor));
+                    out.push_str(&paint(mix(tint, glow_tint, glow * 0.8), "━", truecolor));
                 } else if i == full && filled - full as f32 > 0.25 {
-                    out.push_str(&paint(LEAF, "╸", truecolor));
+                    out.push_str(&paint(tint, "╸", truecolor));
                 } else {
                     out.push_str(&paint(TRACK, "━", truecolor));
                 }
@@ -139,7 +153,7 @@ fn bar(fraction: Option<f32>, t: f32, truecolor: bool) -> String {
             for i in 0..BAR {
                 let d = (i as f32 - head).abs();
                 let glow = (1.0 - d / (span / 2.0)).max(0.0);
-                out.push_str(&paint(if glow > 0.0 { mix(TRACK, LEAF, glow) } else { TRACK }, "━", truecolor));
+                out.push_str(&paint(if glow > 0.0 { mix(TRACK, tint, glow) } else { TRACK }, "━", truecolor));
             }
         }
     }
@@ -217,6 +231,32 @@ impl Board {
         }
     }
 
+    pub fn banner(&self, text: Option<String>) {
+        self.state.lock().unwrap().banner = text;
+    }
+
+    pub fn context(&self, percent: u64) {
+        self.state.lock().unwrap().context = Some(percent);
+    }
+
+    pub fn ejected(&self, steps: usize, tokens: usize) {
+        let mut s = self.state.lock().unwrap();
+        s.ejected.0 += steps;
+        s.ejected.1 += tokens;
+    }
+
+    pub fn notice(&self, text: &str) {
+        let running = self.live && self.running.load(Ordering::SeqCst);
+        if running {
+            self.pause();
+        }
+        let line = format!("  {} {}", Color::Rgb(242, 182, 88).bold().paint("⇣"), Color::Rgb(242, 182, 88).paint(text));
+        eprintln!("{line}");
+        if running {
+            self.resume();
+        }
+    }
+
     pub fn piece(&self, call: &str, target: Option<&str>, bytes: usize, ok: bool) {
         if matches!(call, "plan" | "done") {
             return;
@@ -231,8 +271,8 @@ impl Board {
         {
             let mut s = self.state.lock().unwrap();
             let servers = std::mem::take(&mut s.servers);
-            let cache_until = s.cache_until;
-            *s = State { started: Some(Instant::now()), phase: "thinking".into(), servers, cache_until, ..Default::default() };
+            let (cache_until, context, ejected) = (s.cache_until, s.context, s.ejected);
+            *s = State { started: Some(Instant::now()), phase: "thinking".into(), servers, cache_until, context, ejected, ..Default::default() };
         }
         if !self.live || self.running.swap(true, Ordering::SeqCst) {
             return;
@@ -305,10 +345,18 @@ impl Board {
             _ => s.phase.clone(),
         };
         let mut lines = Vec::new();
-        lines.push(format!("  {} {}", paint(NUCLEUS, spinner, truecolor), Style::new().bold().paint(fit(&title, term.saturating_sub(6)))));
-        let fraction = (total > 0).then(|| (done as f32 + 0.5 * current.is_some() as u8 as f32) / total as f32);
-        let percent = fraction.map(|f| format!("{:>3}%", (f * 100.0).round() as u32)).unwrap_or_default();
-        lines.push(format!("  {} {}  {}", bar(fraction, t, truecolor), Style::new().bold().paint(percent), Style::new().dimmed().paint(clock(elapsed))));
+        if let Some(banner) = &s.banner {
+            let pulse = ((t * 4.0).sin() + 1.0) / 2.0;
+            let arrow = ["⇣", "↓", "⇣", "⤓"][(frame / 4) % 4];
+            lines.push(format!("  {} {}", paint(mix(AMBER, AMBER_GLOW, pulse), arrow, truecolor), paint(AMBER, &fit(banner, term.saturating_sub(6)), truecolor)));
+            let used = s.context.unwrap_or(0) as f32 / 100.0;
+            lines.push(format!("  {} {}  {}", bar_in(Some(used), t, truecolor, AMBER), paint(AMBER, &format!("{:>3}% context", (used * 100.0).round() as u32), truecolor), Style::new().dimmed().paint(clock(elapsed))));
+        } else {
+            lines.push(format!("  {} {}", paint(NUCLEUS, spinner, truecolor), Style::new().bold().paint(fit(&title, term.saturating_sub(6)))));
+            let fraction = (total > 0).then(|| (done as f32 + 0.5 * current.is_some() as u8 as f32) / total as f32);
+            let percent = fraction.map(|f| format!("{:>3}%", (f * 100.0).round() as u32)).unwrap_or_default();
+            lines.push(format!("  {} {}  {}", bar(fraction, t, truecolor), Style::new().bold().paint(percent), Style::new().dimmed().paint(clock(elapsed))));
+        }
         let action = if total > 0 && !s.phase.is_empty() { format!(" {}{}", s.phase, if s.detail.is_empty() { String::new() } else { format!(" {}", s.detail) }) } else if s.detail.is_empty() { String::new() } else { format!(" {}", s.detail) };
         let room = term.saturating_sub(6).min(BAR + 30);
         let blocks = blocks_line(&s.blocks, room.saturating_sub(action.chars().count().min(room / 2)), frame, truecolor);
@@ -321,6 +369,16 @@ impl Board {
             let left = ttl.saturating_sub(at.elapsed());
             facts.push(if left.is_zero() { "cache cold".into() } else { format!("warm {}", clock(left)) });
         }
+        let mut warn: Vec<String> = Vec::new();
+        match s.context {
+            Some(p) if p >= 80 && s.banner.is_none() => warn.push(format!("context {p}% · force-ejects at 95%")),
+            Some(p) if p >= 70 && s.banner.is_none() => warn.push(format!("context {p}% · compacts at 80%")),
+            Some(p) => facts.push(format!("context {p}%")),
+            None => {}
+        }
+        if s.ejected.0 > 0 {
+            warn.push(format!("ejected {} · {}", s.ejected.0, tokens(s.ejected.1)));
+        }
         if let Some(u) = s.usage {
             facts.push(format!("{} MB", u.rss_mb));
             facts.push(format!("cpu {:.0}%", u.cpu));
@@ -332,7 +390,13 @@ impl Board {
                 ServerState::Failed => format!("{name} ✕"),
             });
         }
-        lines.push(format!("  {}", Style::new().dimmed().paint(fit(&facts.join(" · "), term.saturating_sub(4)))));
+        let warn_text = warn.join(" · ");
+        let room = term.saturating_sub(4 + if warn_text.is_empty() { 0 } else { warn_text.chars().count() + 3 });
+        lines.push(format!(
+            "  {}{}",
+            if warn_text.is_empty() { String::new() } else { format!("{} {} ", paint(AMBER, &warn_text, truecolor), Style::new().dimmed().paint("·")) },
+            Style::new().dimmed().paint(fit(&facts.join(" · "), room))
+        ));
         let mut out = erase(s.drawn);
         out.push_str("\x1b[?25l");
         out.push_str(&lines.join("\x1b[0m\x1b[K\n"));

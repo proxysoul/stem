@@ -15,7 +15,20 @@ use std::time::{Duration, Instant};
 
 const SH_OUTPUT_LIMIT: usize = 2_000_000;
 const GREP_DEFAULT_MAX: usize = 300;
+const FAMILIAR_SCORE: f64 = 3.0;
 const DIAGNOSTIC_WAIT: Duration = Duration::from_millis(2500);
+
+pub struct PendingJudge {
+    pub candidates: Vec<crate::learn::Answer>,
+    pub prompt: String,
+    pub resolved: crate::catalog::Resolved,
+}
+
+pub struct StartNote {
+    pub note: Option<String>,
+    pub familiar: bool,
+    pub judge: Option<PendingJudge>,
+}
 
 pub struct CallRecord {
     pub name: String,
@@ -55,11 +68,11 @@ pub struct Host {
     pub ask_usage: Usage,
     pub ask_cost: f64,
     pub plan: Vec<(String, bool)>,
-    pub eject: Vec<(Vec<u64>, Option<String>)>,
     pub context: Value,
     pub offload_dir: Option<PathBuf>,
     facts: Option<crate::facts::Facts>,
     pub growth: crate::growth::Growth,
+    pub learn: crate::learn::Learn,
     board: Board,
     cancel: Arc<AtomicBool>,
     lsp_enabled: bool,
@@ -71,6 +84,7 @@ impl Host {
     pub fn new(root: PathBuf, board: Board, cancel: Arc<AtomicBool>, ask_client: Option<Rc<Client>>, yolo: Arc<AtomicBool>, approver: Option<Approver>) -> Host {
         let project = Project::detect(&root);
         let growth = crate::growth::Growth::open(&root);
+        let learn = crate::learn::Learn::open(&root);
         Host {
             root,
             yolo,
@@ -85,11 +99,11 @@ impl Host {
             ask_usage: Usage::default(),
             ask_cost: 0.0,
             plan: Vec::new(),
-            eject: Vec::new(),
             context: Value::Null,
             offload_dir: None,
             facts: None,
             growth,
+            learn,
             board,
             cancel,
             lsp_enabled: std::env::var("STEM_LSP").map(|v| v != "off" && v != "0").unwrap_or(true),
@@ -108,6 +122,7 @@ impl Host {
             .or(args["cmd"].as_str())
             .map(|s| s.chars().take(80).collect());
         let result = self.call(name, &args);
+        self.learn.observe(name, &args, &result);
         let reply = match &result {
             Ok(v) => json!({"ok": true, "value": v}),
             Err(e) => json!({"ok": false, "error": e}),
@@ -127,13 +142,16 @@ impl Host {
         match name {
             "tools" => Some(json!({"ok": true, "value": self.growth.loadable()})),
             "tool_used" => {
-                self.growth.used(a["name"].as_str().unwrap_or(""), a["ok"].as_bool().unwrap_or(false));
-                self.board.piece("tool", a["name"].as_str(), 200, a["ok"].as_bool().unwrap_or(false));
-                Some(json!({"ok": true, "value": null}))
+                let name = a["name"].as_str().unwrap_or("");
+                let ok = a["ok"].as_bool().unwrap_or(false);
+                let missing = if ok { self.missing_anchors(&self.growth.anchors(name)) } else { Vec::new() };
+                let note = self.growth.used(name, ok, a["size"].as_u64(), a["chars"].as_u64(), &missing);
+                self.board.piece("tool", Some(name), 200, ok);
+                Some(json!({"ok": true, "value": note}))
             }
             "tool_checked" => {
-                self.growth.checked(a["name"].as_str().unwrap_or(""), a["ok"].as_bool().unwrap_or(false), a["detail"].as_str().unwrap_or(""));
-                Some(json!({"ok": true, "value": null}))
+                let note = self.growth.checked(a["name"].as_str().unwrap_or(""), a["ok"].as_bool().unwrap_or(false), a["detail"].as_str().unwrap_or(""));
+                Some(json!({"ok": true, "value": note}))
             }
             _ => None,
         }
@@ -154,45 +172,29 @@ impl Host {
                 Ok(p)
             }
             "sql" => self.sql(a),
-            "save" => self.growth.save(a),
+            "save" => {
+                let mut a = a.clone();
+                let given: Vec<String> = a["anchors"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
+                let wanted = if given.is_empty() { crate::growth::anchors_of(a["code"].as_str().unwrap_or("")) } else { given };
+                let missing = self.missing_anchors(&wanted);
+                let kept: Vec<String> = wanted.into_iter().filter(|w| !missing.contains(w)).collect();
+                a["anchors"] = json!(kept);
+                let mut saved = self.growth.save(&a)?;
+                if !missing.is_empty() {
+                    saved["anchorsNotInCode"] = json!(missing);
+                }
+                Ok(saved)
+            }
             "forget" => {
                 let name = a["name"].as_str().ok_or("missing name")?;
                 self.growth.drop_tool(name, a["reason"].as_str().unwrap_or("forgotten on request"));
                 Ok(json!({"dropped": name}))
             }
             "plan" => self.set_plan(a),
-            "eject" => {
-                let mut ids: Vec<u64> = Vec::new();
-                let id_of = |v: &Value| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().trim_start_matches('#').parse().ok()));
-                match &a["ids"] {
-                    Value::Array(list) => ids.extend(list.iter().filter_map(id_of)),
-                    v if id_of(v).is_some() => ids.extend(id_of(v)),
-                    _ => {}
-                }
-                if let (Some(from), to) = (a["from"].as_u64(), a["to"].as_u64()) {
-                    let to = to.unwrap_or(from);
-                    ids.extend(from.min(to)..=from.max(to));
-                }
-                ids.sort();
-                ids.dedup();
-                if ids.is_empty() {
-                    return Err("$.eject needs step ids, like $.eject([3, 4, 5], \"summary\") or $.eject({from: 3, to: 9})".into());
-                }
-                let live: Vec<u64> = self.context["steps"].as_array().into_iter().flatten().filter(|s| s["state"] == "in").filter_map(|s| s["id"].as_u64()).collect();
-                let unknown: Vec<u64> = ids.iter().copied().filter(|n| !live.contains(n)).collect();
-                if !unknown.is_empty() && unknown.len() == ids.len() {
-                    return Err(format!("no step {unknown:?} is in the context; $.context() lists them"));
-                }
-                ids.retain(|n| live.contains(n));
-                let warm = self.context["cacheWarmSeconds"].as_u64().unwrap_or(0);
-                let percent = self.context["percent"].as_u64().unwrap_or(0);
-                self.eject.push((ids.clone(), a["summary"].as_str().map(str::to_string)));
-                Ok(json!({
-                    "leaving": ids,
-                    "when": if warm == 0 || percent >= 80 { "when this script ends".to_string() } else { format!("when the cache goes cold (about {warm} s) or the context passes 80%; they stay cached until then") }
-                }))
-            }
+            "eject" => Err("ejecting happens only at compaction: Stem asks you which steps to eject when the context passes 80%, or when the user runs /compact. Keep working.".into()),
             "context" => Ok(self.context.clone()),
+            "help" => Ok(Value::String(crate::agent::help(a["name"].as_str()))),
+            "toolList" => Ok(self.growth.list()),
             "recall" => {
                 let id = a["id"].as_u64().or_else(|| a["id"].as_str().and_then(|s| s.trim().trim_start_matches('#').parse().ok())).ok_or("$.recall(id) needs a step id")?;
                 let dir = self.offload_dir.clone().ok_or("nothing was ejected in this session")?;
@@ -216,6 +218,36 @@ impl Host {
                 "$.{other} does not exist. Available: read, write, edit, remove, files, grep, sh, project, test, run, defs, refs, callers, impls, typeAt, rename, symbols, outline, diagnostics, ask"
             )),
         }
+    }
+
+    pub fn finish_learning(&mut self, prompt: &str, finished: bool, steps: usize, answer: &str) {
+        self.learn.finish(prompt, finished, steps, answer);
+    }
+
+    pub fn start_note(&mut self, prompt: &str) -> StartNote {
+        let warm = self.learn.warm(prompt);
+        let files: Vec<String> = warm.as_ref().map(|w| w.files.clone()).unwrap_or_default();
+        let score = warm.as_ref().map(|w| w.score);
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(r) = self.learn.resume_note(prompt) {
+            parts.push(r);
+        }
+        let (same, judge) = self.same_question(prompt);
+        if let Some(a) = same {
+            let note = self.learn.answer_note(&a);
+            parts.push(note);
+        }
+        if let Some(r) = self.learn.regressions(prompt) {
+            parts.push(r);
+        }
+        if let Some(l) = self.learn.lessons_for(prompt, &files) {
+            self.learn.events.push(("learn_used".into(), json!({"what": "lessons"})));
+            parts.push(l);
+        }
+        if let Some(w) = warm {
+            parts.push(w.note);
+        }
+        StartNote { note: (!parts.is_empty()).then(|| parts.join("\n")), familiar: score.is_some_and(|s| s >= FAMILIAR_SCORE), judge }
     }
 
     fn resolve(&self, raw: &str) -> PathBuf {
@@ -503,6 +535,35 @@ impl Host {
         Ok(json!(rows))
     }
 
+    fn missing_anchors(&mut self, anchors: &[String]) -> Vec<String> {
+        if anchors.is_empty() {
+            return Vec::new();
+        }
+        if self.facts.is_none() {
+            match crate::facts::Facts::open(&self.root) {
+                Ok(f) => self.facts = Some(f),
+                Err(_) => return Vec::new(),
+            }
+        }
+        let facts = self.facts.as_mut().unwrap();
+        if facts.refresh().is_err() {
+            return Vec::new();
+        }
+        anchors
+            .iter()
+            .filter(|anchor| {
+                let like = json!(format!("%{anchor}%"));
+                let found = facts
+                    .query("select 1 from symbols where name like ?1 union all select 1 from refs where name like ?1 union all select 1 from files where path like ?1 limit 1", &[like])
+                    .ok()
+                    .and_then(|v| v.as_array().map(|a| !a.is_empty()))
+                    .unwrap_or(true);
+                !found
+            })
+            .cloned()
+            .collect()
+    }
+
     fn sql(&mut self, a: &Value) -> HostResult {
         let query = a["query"].as_str().ok_or("$.sql(query, ...params) needs a query")?;
         if self.facts.is_none() {
@@ -600,7 +661,7 @@ impl Host {
         }
         let names: Vec<String> = existing.iter().map(|p| if p.is_dir() { format!("{}/", self.rel(p)) } else { self.rel(p) }).collect();
         let shown = if names.len() > 6 { format!("{} and {} more", names[..6].join(", "), names.len() - 6) } else { names.join(", ") };
-        if !existing.iter().all(|p| self.scratch(p)) {
+        if !existing.iter().all(|p| self.scratch(p) && !self.inside(p)) {
             self.approve(&format!("delete {shown}"), "deleting cannot be undone from Stem")?;
         }
         let mut removed = Vec::new();
@@ -622,6 +683,9 @@ impl Host {
         let timeout = Duration::from_secs(a["timeout"].as_u64().unwrap_or(300));
         let cwd = a["cwd"].as_str().map(|c| self.resolve(c)).unwrap_or(self.root.clone());
         let mut out = run_command(&cmd, &cwd, timeout, &self.cancel)?;
+        if looks_like_test(&cmd) {
+            self.learn.annotate_test(&mut out);
+        }
         if let Some(r) = rewritten {
             out["note"] = json!(format!("this repo uses {}: ran `{r}` instead of `{original}`", self.project.runner));
         }
@@ -637,12 +701,15 @@ impl Host {
         let filter = a["filter"].as_str().map(str::trim).filter(|f| !f.is_empty());
         let fan_out = base.contains("--filter") || base.contains("--workspaces") || base.contains("turbo ") || base.contains("nx ") || base.contains("lerna ");
         let paths: Vec<&str> = filter.map(|f| f.split_whitespace().collect()).unwrap_or_default();
+        let quoted = paths.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
         let all_paths = !paths.is_empty() && paths.iter().all(|p| self.resolve(p).exists());
+        let learned = self.learn.test_command().map(str::to_string);
         let cmd = match filter {
-            Some(_) if all_paths && self.project.runner == "bun" => format!("bun test {}", paths.join(" ")),
-            Some(_) if all_paths && self.project.runner == "cargo" => format!("cargo test {}", paths.iter().filter_map(|p| Path::new(p).file_stem().and_then(|s| s.to_str())).collect::<Vec<_>>().join(" ")),
-            Some(f) if base.starts_with("npm run") || base.starts_with("pnpm run") || base.starts_with("yarn run") => format!("{base} -- {f}"),
-            Some(f) => format!("{base} {f}"),
+            Some(_) if all_paths && learned.is_some() => learned.unwrap_or_default().replace("<files>", &quoted),
+            Some(_) if all_paths && self.project.runner == "bun" => format!("bun test {quoted}"),
+            Some(_) if all_paths && self.project.runner == "cargo" => format!("cargo test {}", paths.iter().filter_map(|p| Path::new(p).file_stem().and_then(|s| s.to_str())).map(shell_quote).collect::<Vec<_>>().join(" ")),
+            Some(_) if base.starts_with("npm run") || base.starts_with("pnpm run") || base.starts_with("yarn run") => format!("{base} -- {quoted}"),
+            Some(_) => format!("{base} {quoted}"),
             None if fan_out => {
                 return Err(format!(
                     "this repo's test command runs every package (`{base}`), which takes many minutes. Pass the test files or folders the change affects: $.test(\"path/to/file.test.ts\")"
@@ -650,11 +717,15 @@ impl Host {
             }
             None => base,
         };
+        if let Some(reason) = crate::guard::destructive(&cmd) {
+            self.approve(&cmd, &reason)?;
+        }
         let timeout = Duration::from_secs(a["timeout"].as_u64().unwrap_or(150));
         let mut out = run_command(&cmd, &self.root, timeout, &self.cancel)?;
         let code = out["code"].as_i64().unwrap_or(-1);
         out["passed"] = json!(code == 0);
         out["cmd"] = json!(cmd);
+        self.learn.annotate_test(&mut out);
         let all = format!("{}\n{}", out["out"].as_str().unwrap_or(""), out["err"].as_str().unwrap_or(""));
         let tail: Vec<&str> = all.lines().filter(|l| !l.trim().is_empty()).collect();
         out["summary"] = json!(tail[tail.len().saturating_sub(30)..].join("\n"));
@@ -1317,6 +1388,36 @@ impl Host {
         Ok(json!(rows))
     }
 
+    fn same_question(&mut self, prompt: &str) -> (Option<crate::learn::Answer>, Option<PendingJudge>) {
+        let candidates = self.learn.answer_candidates(prompt);
+        let Some((sure, top)) = candidates.first().cloned() else {
+            return (None, None);
+        };
+        if sure {
+            self.learn.events.push(("learn_used".into(), json!({"what": "answer_sure"})));
+            return (Some(top), None);
+        }
+        let Some(client) = self.ask_client.as_ref() else {
+            return (None, None);
+        };
+        let list: Vec<String> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, (_, c))| format!("{}. Asked: {}\nAnswer: {}", i + 1, c.request.trim(), c.answer.trim()))
+            .collect();
+        let judge = format!(
+            "New question:\n{}\n\nEarlier questions in this project, each with the answer it got (the code they cite is unchanged since):\n{}\n\nDoes one earlier answer fully answer the new question, naming the code the new question asks about? Reply with its number, or 0 if none does. Reply with the number only.",
+            prompt.chars().take(1500).collect::<String>(),
+            list.join("\n\n")
+        );
+        (None, Some(PendingJudge { candidates: candidates.into_iter().map(|(_, a)| a).collect(), prompt: judge, resolved: client.resolved.clone() }))
+    }
+
+    pub fn add_ask_usage(&mut self, usage: Usage, cost: f64) {
+        self.ask_usage.add(usage);
+        self.ask_cost += cost;
+    }
+
     fn ask(&mut self, a: &Value) -> HostResult {
         let client = self.ask_client.clone().ok_or("no small model is available for $.ask with this provider")?;
         let prompt = a["prompt"].as_str().unwrap_or("");
@@ -1347,6 +1448,14 @@ impl Host {
             return Err("the small model returned an empty answer".into());
         }
         Ok(json!(text))
+    }
+}
+
+fn shell_quote(word: &str) -> String {
+    if !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || "_./:=@%+,-".contains(c)) {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
     }
 }
 
@@ -1636,4 +1745,9 @@ fn symbol_kind(kind: u64) -> &'static str {
 fn dedup(rows: &mut Vec<Value>) {
     let mut seen = std::collections::HashSet::new();
     rows.retain(|r| seen.insert(format!("{}:{}:{}", r["file"], r["line"], r["text"])));
+}
+
+fn looks_like_test(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    ["vitest", "jest", "bun test", "pytest", "cargo test", "go test", "npm test", "npm run test", "bun run test", "pnpm test", "yarn test", "mocha", "ava"].iter().any(|k| c.contains(k))
 }

@@ -11,6 +11,7 @@ pub enum Block {
     Text(String),
     Thinking { text: String, signature: String },
     RedactedThinking(String),
+    Reasoning(Value),
     ToolUse { id: String, name: String, input: Value },
     ToolResult { id: String, content: String, is_error: bool },
 }
@@ -73,6 +74,7 @@ pub struct Client {
     claude: crate::claude_code::Link,
     native: crate::claude_native::Link,
     long_cache: Cell<bool>,
+    plain: Cell<bool>,
 }
 
 pub const CACHE_TTLS: [&str; 2] = ["5m", "1h"];
@@ -126,6 +128,7 @@ impl Client {
             claude: Default::default(),
             native: Default::default(),
             long_cache: Cell::new(saved_long_cache()),
+            plain: Cell::new(false),
         }
     }
 
@@ -135,7 +138,7 @@ impl Client {
             Protocol::Anthropic | Protocol::ClaudeNative => Some(Duration::from_secs(if self.long_cache.get() { 3600 } else { 300 })),
             Protocol::ClaudeCode => Some(Duration::from_secs(300)),
             Protocol::OpenAiChat if claude => Some(Duration::from_secs(300)),
-            Protocol::OpenAiChat if self.resolved.provider_id == "openai" || self.resolved.model.id.starts_with("gpt-") => Some(Duration::from_secs(600)),
+            Protocol::OpenAiChat | Protocol::OpenAiResponses if self.resolved.provider_id == "openai" || self.resolved.model.id.starts_with("gpt-") => Some(Duration::from_secs(600)),
             _ => None,
         }
     }
@@ -159,6 +162,10 @@ impl Client {
 
     pub fn cache_ttl_choice(&self) -> &'static str {
         if self.long_cache.get() { "1h" } else { "5m" }
+    }
+
+    pub fn set_plain(&self, on: bool) {
+        self.plain.set(on);
     }
 
     pub fn efforts(&self) -> Vec<String> {
@@ -185,6 +192,8 @@ impl Client {
             Protocol::Anthropic => (format!("{}/messages", self.resolved.base_url), self.anthropic_body(system, msgs, tools)),
             Protocol::ClaudeNative => (crate::claude_native::messages_url(), self.anthropic_body(system, msgs, tools)),
             Protocol::OpenAiChat => (format!("{}/chat/completions", self.resolved.base_url), self.openai_body(system, msgs, tools)),
+            Protocol::OpenAiResponses => (format!("{}/responses", self.resolved.base_url), self.responses_body(system, msgs, tools)),
+            Protocol::Command => return crate::graft::complete(&self.resolved, self.effort().as_deref(), self.max_output, system, msgs, tools, cancel),
         };
         let mut last_error = String::new();
         let mut refreshed = false;
@@ -207,7 +216,8 @@ impl Client {
                 Protocol::Anthropic => request
                     .header("authorization", &format!("Bearer {}", self.resolved.key))
                     .header("anthropic-version", "2023-06-01"),
-                Protocol::OpenAiChat | Protocol::ClaudeCode => request.header("authorization", &format!("Bearer {}", self.resolved.key)),
+                _ if self.resolved.key.is_empty() => request,
+                _ => request.header("authorization", &format!("Bearer {}", self.resolved.key)),
             };
             let payload = payload.unwrap_or_else(|| body.to_string().into_bytes());
             let response = match request.send(&payload[..]) {
@@ -239,7 +249,8 @@ impl Client {
             let reader = BufReader::new(response.into_body().into_reader());
             let result = match self.resolved.protocol {
                 Protocol::Anthropic | Protocol::ClaudeNative => read_anthropic(reader, cancel),
-                Protocol::OpenAiChat | Protocol::ClaudeCode => read_openai(reader, cancel),
+                Protocol::OpenAiResponses => read_responses(reader, cancel),
+                _ => read_openai(reader, cancel),
             };
             match result {
                 Ok(reply) => return Ok(reply),
@@ -273,7 +284,7 @@ impl Client {
         if !tool_defs.is_empty() {
             body["tools"] = Value::Array(tool_defs);
         }
-        match &self.resolved.model.reasoning {
+        match if self.plain.get() { &Reasoning::None } else { &self.resolved.model.reasoning } {
             Reasoning::Effort(_) => {
                 body["thinking"] = json!({"type": "adaptive"});
                 if let Some(effort) = self.effort() {
@@ -341,12 +352,84 @@ impl Client {
             body["reasoning_effort"] = json!(effort);
         }
         if self.resolved.provider_id == "openai" {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(system, &mut h);
-            body["prompt_cache_key"] = json!(format!("stem-{:016x}", std::hash::Hasher::finish(&h)));
+            body["prompt_cache_key"] = json!(cache_key(system));
         }
         body
     }
+
+    fn responses_body(&self, system: &str, msgs: &[Msg], tools: &[Tool]) -> Value {
+        let input: Vec<Value> = msgs.iter().flat_map(responses_items).collect();
+        let mut body = json!({
+            "model": self.resolved.model.id,
+            "instructions": system,
+            "input": input,
+            "stream": true,
+            "store": false,
+            "max_output_tokens": self.max_output,
+            "prompt_cache_key": cache_key(system),
+        });
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(
+                tools
+                    .iter()
+                    .map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.schema, "strict": false}))
+                    .collect(),
+            );
+        }
+        if self.resolved.model.reasoning != Reasoning::None {
+            body["include"] = json!(["reasoning.encrypted_content"]);
+            if let (Reasoning::Effort(_), Some(effort)) = (&self.resolved.model.reasoning, self.effort()) {
+                body["reasoning"] = json!({"effort": effort});
+            }
+        }
+        body
+    }
+}
+
+fn cache_key(system: &str) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(system, &mut h);
+    format!("stem-{:016x}", std::hash::Hasher::finish(&h))
+}
+
+fn responses_items(msg: &Msg) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut text = Vec::new();
+    for b in &msg.blocks {
+        match (msg.role, b) {
+            (Role::User, Block::ToolResult { id, content, .. }) => out.push(json!({"type": "function_call_output", "call_id": id, "output": content})),
+            (Role::User, Block::Text(t)) => text.push(json!({"type": "input_text", "text": t})),
+            (Role::Assistant, Block::Reasoning(item)) => out.push(item.clone()),
+            (Role::Assistant, Block::Text(t)) if !t.is_empty() => out.push(json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": t}]})),
+            (Role::Assistant, Block::ToolUse { id, name, input }) => out.push(json!({"type": "function_call", "call_id": id, "name": name, "arguments": input.to_string()})),
+            _ => {}
+        }
+    }
+    if !text.is_empty() {
+        out.push(json!({"role": "user", "content": text}));
+    }
+    out
+}
+
+pub fn anthropic_content(content: &Value) -> Vec<Block> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| match b["type"].as_str()? {
+            "text" => Some(Block::Text(b["text"].as_str().unwrap_or("").into())),
+            "tool_use" => Some(Block::ToolUse {
+                id: b["id"].as_str().unwrap_or("").into(),
+                name: b["name"].as_str().unwrap_or("").into(),
+                input: b["input"].clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn anthropic_messages(msgs: &[Msg]) -> Vec<Value> {
+    msgs.iter().map(anthropic_msg).collect()
 }
 
 fn error_message(text: &str) -> String {
@@ -360,12 +443,13 @@ fn anthropic_msg(msg: &Msg) -> Value {
     let content: Vec<Value> = msg
         .blocks
         .iter()
-        .map(|b| match b {
-            Block::Text(t) => json!({"type": "text", "text": t}),
-            Block::Thinking { text, signature } => json!({"type": "thinking", "thinking": text, "signature": signature}),
-            Block::RedactedThinking(data) => json!({"type": "redacted_thinking", "data": data}),
-            Block::ToolUse { id, name, input } => json!({"type": "tool_use", "id": id, "name": name, "input": input}),
-            Block::ToolResult { id, content, is_error } => json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error}),
+        .filter_map(|b| match b {
+            Block::Text(t) => Some(json!({"type": "text", "text": t})),
+            Block::Thinking { text, signature } => Some(json!({"type": "thinking", "thinking": text, "signature": signature})),
+            Block::RedactedThinking(data) => Some(json!({"type": "redacted_thinking", "data": data})),
+            Block::Reasoning(_) => None,
+            Block::ToolUse { id, name, input } => Some(json!({"type": "tool_use", "id": id, "name": name, "input": input})),
+            Block::ToolResult { id, content, is_error } => Some(json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error})),
         })
         .collect();
     json!({"role": if msg.role == Role::User { "user" } else { "assistant" }, "content": content})
@@ -598,5 +682,67 @@ fn read_openai<R: BufRead>(reader: R, cancel: &Arc<AtomicBool>) -> Result<Reply,
         Some(s) => s,
         None => return Err(StreamError::Retry("the stream ended before the model finished".into())),
     };
+    Ok(Reply { blocks, stop, usage })
+}
+
+fn read_responses<R: BufRead>(reader: R, cancel: &Arc<AtomicBool>) -> Result<Reply, StreamError> {
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut usage = Usage::default();
+    let mut stop = None;
+    sse_events(reader, cancel, |_, v| {
+        match v["type"].as_str().unwrap_or("") {
+            "response.output_item.done" => {
+                let item = &v["item"];
+                match item["type"].as_str().unwrap_or("") {
+                    "message" => {
+                        let text: String = item["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
+                        if !text.is_empty() {
+                            blocks.push(Block::Text(text));
+                        }
+                    }
+                    "function_call" => {
+                        let args = item["arguments"].as_str().unwrap_or("");
+                        blocks.push(Block::ToolUse {
+                            id: item["call_id"].as_str().unwrap_or("").into(),
+                            name: item["name"].as_str().unwrap_or("").into(),
+                            input: if args.trim().is_empty() { json!({}) } else { serde_json::from_str(args).unwrap_or_else(|_| json!({"__unparsed": args})) },
+                        });
+                    }
+                    "reasoning" if item["encrypted_content"].is_string() => {
+                        let mut kept = item.clone();
+                        if let Some(o) = kept.as_object_mut() {
+                            o.remove("status");
+                        }
+                        blocks.push(Block::Reasoning(kept));
+                    }
+                    _ => {}
+                }
+            }
+            kind @ ("response.completed" | "response.incomplete") => {
+                let r = &v["response"];
+                let u = &r["usage"];
+                let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
+                usage.input = u["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached);
+                usage.cache_read = cached;
+                usage.output = u["output_tokens"].as_u64().unwrap_or(0);
+                stop = Some(match (kind, r["incomplete_details"]["reason"].as_str()) {
+                    ("response.incomplete", Some("max_output_tokens")) => Stop::MaxTokens,
+                    ("response.incomplete", reason) => Stop::Other(reason.unwrap_or("incomplete").into()),
+                    _ if blocks.iter().any(|b| matches!(b, Block::ToolUse { .. })) => Stop::ToolUse,
+                    _ => Stop::End,
+                });
+                return Ok(false);
+            }
+            "response.failed" | "error" => {
+                let e = if v["response"]["error"].is_object() { &v["response"]["error"] } else if v["error"].is_object() { &v["error"] } else { &v };
+                let message = e["message"].as_str().unwrap_or("stream error").to_string();
+                let code = e["code"].as_str().unwrap_or("");
+                return Err(if code.contains("server") || code.contains("rate") || code.contains("overload") { StreamError::Retry(message) } else { StreamError::Fatal(message) });
+            }
+            _ => {}
+        }
+        Ok(true)
+    })?;
+    let stop = stop.ok_or_else(|| StreamError::Retry("the stream ended before the model finished".into()))?;
     Ok(Reply { blocks, stop, usage })
 }

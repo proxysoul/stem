@@ -74,7 +74,7 @@ fn block_text(b: &Block) -> Option<String> {
         Block::Text(t) => Some(t.clone()),
         Block::ToolUse { input, .. } => Some(format!("```js\n{}\n```", input["code"].as_str().unwrap_or(""))),
         Block::ToolResult { content, is_error, .. } => Some(format!("{}{content}", if *is_error { "Script failed:\n" } else { "Script result:\n" })),
-        Block::Thinking { .. } | Block::RedactedThinking(_) => None,
+        Block::Thinking { .. } | Block::RedactedThinking(_) | Block::Reasoning(_) => None,
     }
 }
 

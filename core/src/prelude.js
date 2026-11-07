@@ -71,6 +71,7 @@ const __base = {
   sql: (query, ...params) => __call("sql", { query: String(query), params: params.length === 1 && Array.isArray(params[0]) ? params[0] : params }),
   eject: (ids, summary) => __call("eject", Array.isArray(ids) || typeof ids !== "object" || ids === null ? { ids: Array.isArray(ids) ? ids : [ids], summary: typeof summary === "string" ? summary : summary?.summary } : ids),
   context: () => __call("context", {}),
+  help: (name) => __call("help", { name: name === undefined ? null : String(name) }),
   recall: (id) => __call("recall", { id }),
   plan: (...steps) => __call("plan", { steps: steps.flat() }),
   done: (which) => __call("done", { which: which === undefined ? null : which }),
@@ -98,34 +99,47 @@ const __wrapTool = (name, fn, check, effects, verified) => (...args) => {
       let ok = false;
       let detail = "returned false";
       try { ok = !!check(fn); } catch (e) { detail = String(e?.message ?? e); }
-      __host("tool_checked", JSON.stringify({ name, ok, detail: ok ? "" : detail }));
-      if (!ok) {
-        delete __base[name];
-        throw new Error(`$.${name} failed its self-check (${detail}) and was dropped. Do the work with the core $ functions.`);
-      }
+      const note = JSON.parse(__host("tool_checked", JSON.stringify({ name, ok, detail: ok ? "" : detail }))).value;
+      if (note) __logs.push(note);
     }
   }
   try {
     const value = fn(...args);
-    __host("tool_used", JSON.stringify({ name, ok: true }));
+    const size = Array.isArray(value) ? value.length : value && typeof value === "object" ? Object.keys(value).length : value ? 1 : 0;
+    let chars = 0;
+    try { chars = JSON.stringify(value)?.length ?? 0; } catch {}
+    const note = JSON.parse(__host("tool_used", JSON.stringify({ name, ok: true, size, chars }))).value;
+    if (note) __logs.push(note);
     return value;
   } catch (e) {
     __host("tool_used", JSON.stringify({ name, ok: false }));
     throw e;
   }
 };
+const __builtin = new Set([...Object.keys(__base), "save", "tools", "forget", "writeFile"]);
 __base.save = (name, fn, opts = {}) => {
+  if (__builtin.has(name)) throw new Error(`$.${name} is a built-in; save under another name`);
   if (typeof fn !== "function") throw new Error("$.save(name, fn, {doc, check}): fn must be a function that uses $");
   if (typeof opts.check !== "function") throw new Error("$.save needs {check: (f) => ...}: call f on a case you know and return true when the answer is right");
   let ok = false;
   try { ok = !!opts.check(fn); } catch (e) { throw new Error(`not saved: the self-check threw ${e?.message ?? e}`); }
   if (!ok) throw new Error("not saved: the self-check returned false");
-  const result = __call("save", { name, code: fn.toString(), check: opts.check.toString(), doc: opts.doc ?? "" });
+  const result = __call("save", { name, code: fn.toString(), check: opts.check.toString(), doc: opts.doc ?? "", anchors: Array.isArray(opts.anchors) ? opts.anchors.map(String) : [] });
   __base[name] = __wrapTool(name, fn, opts.check, result.effects ?? [], true);
   return result;
 };
-__base.forget = (name, reason) => { delete __base[name]; return __call("forget", { name, reason }); };
+__base.tools = () => __call("toolList", {});
+__base.forget = (name, reason) => {
+  if (__builtin.has(name)) throw new Error(`$.${name} is a built-in and cannot be forgotten`);
+  const result = __call("forget", { name, reason });
+  delete __base[name];
+  return result;
+};
 for (const t of JSON.parse(__host("tools", "{}")).value ?? []) {
+  if (__builtin.has(t.name)) {
+    __host("tool_checked", JSON.stringify({ name: t.name, ok: false, detail: `does not load: it would replace the built-in $.${t.name}` }));
+    continue;
+  }
   try {
     __base[t.name] = __wrapTool(t.name, (0, eval)("(" + t.code + ")"), (0, eval)("(" + t.check + ")"), t.effects ?? [], false);
   } catch (e) {
