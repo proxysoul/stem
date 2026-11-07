@@ -1,4 +1,11 @@
 node_modules/
+.empryo/
+.stem/
+.env
+.env.*
+!.env.example
+versions/
+*.log
 .DS_Store
 ab/*/target/
 ab/cpp-qjs/build/
