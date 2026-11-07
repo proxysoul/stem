@@ -5,7 +5,8 @@ One Rust binary (6.8 MB release build) with QuickJS inside. It works in the fold
 ## Install and start
 
 ```sh
-cargo install --path core          # puts `stem` in ~/.cargo/bin
+curl -fsSL https://raw.githubusercontent.com/proxysoul/stem/main/install.sh | sh   # prebuilt, checksum-checked
+cargo install --path core          # or from source, into ~/.cargo/bin
 echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.stem/.env && chmod 600 ~/.stem/.env
 cd any/project && stem             # the input; or: stem "fix the failing test"
 ```
@@ -23,10 +24,14 @@ No key? `stem login claude-native` (alias `claude-n`, or `/login claude-native` 
 | `stem` | one native input. Enter sends; Alt+Enter, Shift+Enter or Ctrl+J add a line; Ctrl+U, Ctrl+W, Ctrl+K, Ctrl+Y, Ctrl+R and history work as in a shell. Type `/` for the command menu |
 | `stem "task"` | runs one task, prints the final answer on stdout, the cost line on stderr. Piped stdin works too |
 | `stem models [filter]` | models you can use now (● = key set), live from models.dev |
+| `stem learn` | between sessions: runs the project's candidate test commands on a clean checkout next to recently changed code, keeps the one that passes and records failures that exist before any change. `stem learn feedback <text>` stores what was wrong with the last fix; `stem learn <request>` shows the start note |
+| `stem grafts` | your own providers and agents from `~/.stem/grafts` and `.stem/grafts`, with key status and skipped files |
 | `stem doctor` | which model, key, API, project commands and language servers Stem picks, and how long each server takes to be ready |
 | `stem stats` | cost, tokens, scripts and `$` calls from this project's event logs |
 | `stem js [file]` | runs one script against `$` with no model (stdin if no file) |
-| `stem mcp` | serves `$` as one MCP tool, `js`, over stdio, so another harness can use Stem as its whole tool layer |
+| `stem mcp` | serves Stem over MCP (stdio; spec 2026-07-28 with `server/discover`, and older clients through `initialize`). Typed tools, each with `inputSchema`, `outputSchema`, annotations and `structuredContent`: `defs`, `refs`, `callers`, `impls`, `symbols`, `diagnostics`, `sql`, `js`, `task` (Stem runs a whole task with its own model and returns `{answer, files, cost, steps, seconds}`), `brief`, `remember`, `feedback`. `STEM_MCP_TOOLS=a,b` limits the list |
+| `stem integrate [harness]` | for `claude`, `codex`, `opencode`, `pi`, `empryo` (default: all), writes into this project the MCP entry (Codex: tools pre-approved; Empryo: resident; pi: registered by its extension and exposed directly), the lifecycle hooks or plugin, and a `stem` skill that tells the agent which tool answers which question. Running it again replaces Stem's entries and changes nothing else |
+| `stem hook prompt\|stop` | the lifecycle hook those harnesses call, with their JSON on stdin. `prompt` prints what Stem knows as `additionalContext` and snapshots the working tree; `stop` learns from the diff since that snapshot and the last answer. It never fails the host: problems go to `.stem/hooks.log` |
 
 Flags: `-m provider/model` (or `STEM_MODEL`), `-e effort` (or `STEM_EFFORT`, default `high`), `-y` / `--yolo` (or `STEM_YOLO=1`), `-C folder`.
 
@@ -63,17 +68,32 @@ History is append-only: Stem never rewrites an earlier message, so every turn re
 
 A SQLite store in `.stem/facts.db`, filled by tree-sitter (TypeScript, JavaScript, Rust, Python, Go) and git. It stays current on every query: only files whose size or time changed are parsed again. Tables: `files`, `symbols` (definitions), `refs` (calls and type uses by name), `commits`, `commit_files`, `cochange` (files changed together). On an 8,079-file TypeScript repo (1.06M lines) the first index takes 3.9 s and holds 84k symbols, 714k references and 3,000 commits; later queries take under a millisecond plus a quick change check. `$.sql` only reads.
 
-## Growth (`$.save`)
+## Learning (`.stem/learn`)
 
-`$.save(name, fn, {doc, check})` keeps a function made of `$` calls in `.stem/tools/`. The check runs before saving and again the first time the function is used in a session (only for functions that do not change files); a failing one is dropped. A function that fails 3 times and more often than it works is dropped, and so is one unused for 21 days. Up to 12 saved functions are listed in the system prompt with their use counts, and `stem tools` lists them all, the dropped ones with the reason. Calling a `$` function that does not exist names the closest ones and shows how to save it. When a script of the same shape (strings and numbers aside) has run 3 times in the project, its result suggests saving it. `STEM_TOOLS=off` turns all of this off; every turn logs the generation (a hash of the live functions).
+Stem learns from its own finished work in this project, with nothing written by hand. Everything lives in `.stem/learn/state.json`, and it reaches the model once, as a short note at the start of a request; nothing is added in the middle of a task.
 
-## Proof before "done"
+- **Resume.** A session that stops without an answer stores its request, edits, scratch scripts and last result. A later request with the same words gets them back with the earlier request quoted, and each edit marked as still in the files, undone, or changed since.
+- **Regressions.** Every string edit a finished task kept is stored as before/after. When every edit of one earlier fix is undone in its file and the new request shares words with that fix's request, the start note shows the fix and asks to re-apply it. Fixes that got negative feedback are dropped.
+- **Answers.** A finished answer that cites files is stored with their content hashes. A later question whose words (from the earlier question and its answer) overlap gets it back only when those files are unchanged and a small-model judge, shown the earlier answers, says one fully answers it. The judge runs alongside the first model call: a "no" adds no wait, a "yes" stops that call and the model answers from the earlier answer.
+- **Feedback.** `stem learn feedback "<what failed>"` (a CI failure, a review comment) is stored with the files the last task changed, and comes back with that code or a similar request.
+- **Familiarity.** When a task ends with changes, Stem links the words of the request to the files it changed. A later request with overlapping words starts with those files, and runs at low reasoning effort when the match is strong.
+- **Clean-checkout baseline.** Between sessions `stem learn` runs the candidate test commands (Stem's default and the runners in `package.json`) on the tests the project's fixes used, on a clean checkout (it skips when there are uncommitted changes). It keeps the command with the fewest failures there, the fastest if several tie, and `$.test` uses it. Tests that fail on a clean checkout are reported as pre-existing.
+- **Nothing stale gets through.** Each item is checked against the code when it is used, never trusted from memory: answers only while the files they cite hash the same; regression fixes only while every "before" is back and every "after" gone (and Stem only re-applies one itself if no commit removed it, since that may have been on purpose); resume edits are re-checked one by one, and the whole resume expires after a day; feedback is marked when its code changed since, and dropped once it is 100 sessions old and changed; familiar files fade with a half-life of 60 sessions and drop when the file is gone. The test runner and known failures are measured again by `stem learn` on a clean checkout. The facts store re-parses any file whose size or time changed before every query.
+- `stem learn <request>` prints the note Stem would give for that request. It only shows; it never changes files.
 
-Stem does not accept a final answer while files changed since anything last ran, or when a bug fix ran no reproduction, or when a task changed and ran nothing at all. It asks once for each case (a repro script in /tmp, then the covering tests from `$.testsFor`). Scratch files under /tmp need no approval.
+Measured on `bench/seq` (see `bench/README.md`), each idea where it applies: continuing a stopped session costs 60% less, a regression 36% less (with the learned test runner), a question asked again in other words 59% less, a new bug in familiar code 31% less (with the runner), all at the same fix rate and faster; a rejected fix asked again passes 6/6 instead of 1/6. A new feature in familiar code costs 39% less but passed 22/24 against 24/24. Ideas that cost more than they saved were removed and are listed there.
+
+`$.save` still keeps project functions with anchors, versions and stale marks; Stem no longer asks for them on its own.
+
+## Scripts, not single calls
+
+Each step is one script that can chain any number of `$` calls and use each result in the next. The system prompt lists the return shape of every call, so the model knows what comes back before it runs anything. A failed call throws an Error the script can catch and handle; if it doesn't, the script stops there and reports which call failed, and edits made before that are kept.
+
+How to check a change is the model's call, or the user's: Stem never forces a reproduction or a test run before "done". The answer says what was checked.
 
 ## Long conversations
 
-Every step (one script and its result) ends with a short id, `[#7]`. `$.context()` lists them: id, tokens, what it called, and `in`, `leaving` or `out`, with the context use and the seconds the cache stays warm. `$.eject([ids], summary)` marks steps to leave; each goes to `.stem/offload/<session>/<id>.md` and the summary (written by the same model if left out, or `STEM_SUMMARIZER=provider/model`) stays in its place. `$.recall(id)` brings one back as a new result at the end. Ejected steps only leave when it costs nothing extra: when the cache has gone cold anyway, or once the context passes 80%. Until then they stay and the cache keeps hitting. At 95% Stem marks the oldest half itself and moves it out at once.
+Every step (one script and its result) starts with a short id, `[#7]`. `$.context()` returns `{used, limit, percent, cacheWarmSeconds, steps: [{id, tokens, what, state}], outCount}`, where `state` is `in` or `out`. Steps leave the context only at compaction: when the context passes 80%, or when you type `/compact`, Stem asks the model once which finished steps to eject, by id, each with an optional one-line summary, and the board shows it is choosing. Each ejected step is written to `.stem/offload/<session>/<id>.md`, and a line with its id, what it called and the summary stays in its place. `$.recall(id)` brings one back as a new result at the end. At 95% Stem ejects the oldest half itself. A script cannot eject: `$.eject` is refused with that explanation, so the cache keeps hitting between compactions.
 
 ## Cache per provider
 
@@ -95,10 +115,22 @@ Nothing about models is built in. On first use Stem fetches `https://models.dev/
 
 - No `--model`: the first provider whose key is set (direct providers before gateways), and its newest model that models.dev describes as a coding model. With an Anthropic key today that is `claude-sonnet-5-5`.
 - `--model name`: any provider with a key that lists that model. `--model provider/model`: exactly that.
-- The protocol comes from the provider's `npm` field: `@ai-sdk/anthropic` speaks the Anthropic Messages API, OpenAI and OpenAI-compatible providers and gateways speak chat completions. Context size, output limit, reasoning options (effort or thinking budget), tool support and prices all come from models.dev, so a new model works the day models.dev lists it.
+- The protocol comes from the provider's `npm` field: `@ai-sdk/anthropic` speaks the Anthropic Messages API, `@ai-sdk/openai` speaks the OpenAI Responses API (reasoning carried between steps as encrypted items, `store: false`), and OpenAI-compatible providers and gateways speak chat completions. `STEM_PROTOCOL=anthropic|chat|responses` overrides it. Context size, output limit, reasoning options (effort or thinking budget), tool support and prices all come from models.dev, so a new model works the day models.dev lists it.
 - Gateways (LLM Gateway, OpenRouter, ...) are detected from their routed model ids. When a gateway's entry lacks limits or prices, Stem fills them from the model's origin provider through `canonical_model_id`.
 - `$.ask` uses the cheapest recent model of the same provider.
 - `claude-code/...` takes its models from the anthropic entry. With no key set and `claude` installed, it is the default. Scripts go in ```js blocks (no native tools), and prices show $0 since the plan pays.
+
+## Grafts: your own providers and agents
+
+A graft is one JSON file in `~/.stem/grafts/` (yours) or `.stem/grafts/` (this project's; it wins on the same name). The file name is the provider id, so `.stem/grafts/gw.json` gives `stem -m gw/<model>`. `stem grafts` lists them, which key each needs, and why a file was skipped.
+
+```json
+{ "protocol": "responses", "api": "https://api.llmgateway.io/v1", "env": ["LLMGW_KEY"], "models": ["gpt-5-mini"] }
+```
+
+- `protocol`: `anthropic`, `chat`, `responses` or `command`. The first three need `api`; `env` names the key variables (leave it out for no key).
+- `models`: ids, or an object of models.dev-shaped entries. Limits and prices left out are filled from any models.dev provider that lists the same id.
+- `command`: Stem runs the program once per model call, writes one JSON request to stdin (`model`, `system`, `messages` and `tools` in Anthropic Messages shape, `max_tokens`, `effort`) and reads the last JSON line of stdout: `{"content": [...], "stop_reason": "end_turn"|"tool_use"|"max_tokens", "usage": {...}}` or `{"error": "..."}`. Anything can sit behind it: a vendor SDK, a local model, or another coding agent. `grafts/openai-chat.ts` is a 40-line example that forwards to any chat-completions endpoint; `./` paths in `command` are relative to the graft file.
 
 ## What runs where
 

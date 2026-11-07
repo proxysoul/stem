@@ -12,7 +12,7 @@
 <picture><source media="(prefers-color-scheme: dark)" srcset="brand/readme/terminal-dark.svg"><img alt="A real Stem run: it reproduces an expired Stop bug, fixes stop-memory.ts, checks the repro and the tests, and answers with Asked, Done and Not done. 11 scripts, cache 88%, $0.15, 74 s." src="brand/readme/terminal-light.svg" width="100%"></picture>
 
 ```sh
-cargo install --path core
+curl -fsSL https://raw.githubusercontent.com/proxysoul/stem/main/install.sh | sh   # or: cargo install --path core
 stem login claude-n          # your Claude plan, or any key in ~/.stem/.env
 cd your/project && stem
 ```
@@ -40,7 +40,8 @@ cd your/project && stem
 | `stem doctor` | model, key, project, servers |
 | `stem stats` | cost, tokens, scripts |
 | `stem js [file]` | run a script against `$`, no model |
-| `stem mcp` | serve `$` as one MCP tool |
+| `stem mcp` | serve Stem over MCP: `js`, `brief`, `remember`, `feedback` |
+| `stem integrate [harness]` | plug Stem into Claude Code, Codex, OpenCode, pi, Empryo |
 
 | In the input | |
 |---|---|
@@ -49,6 +50,22 @@ cd your/project && stem
 | `/cache 1h` | prompt cache TTL: `5m` or `1h` |
 | `/yolo` | approvals off or on |
 | `/status` · `/cost` · `/new` | state, spend, fresh start |
+
+## Inside other agents
+
+`stem integrate` (or one of `claude`, `codex`, `opencode`, `pi`, `empryo`) plugs Stem into the agent you already use, for this project, through each agent's own extension points:
+
+| Harness | Tools (MCP, typed) | Before / after each request | Skill |
+|---|---|---|---|
+| Claude Code | `.mcp.json` | hooks in `.claude/settings.json` | `.claude/skills/stem` |
+| Codex | `.codex/config.toml`, pre-approved | `.codex/hooks.json` (trust once with `/hooks`) | `.agents/skills/stem` |
+| OpenCode | `opencode.json` | plugin `.opencode/plugins/stem.ts` | `.opencode/skills/stem` |
+| pi | registered by the extension, exposed directly | extension `.pi/extensions/stem.ts` | `.agents/skills/stem` |
+| Empryo | `.empryo/config.json`, resident | `.empryo/hooks.json` | `.agents/skills/stem` |
+
+The agent gets real tools, each with an input and output schema: `defs`, `refs`, `callers`, `impls` (language servers), `symbols`, `diagnostics`, `sql` over symbols and git history, `js` (a script against `$`), `task` (Stem does a whole task with its own cheap model and returns the answer, changed files and cost) and `feedback`. Before each request it gets what Stem learned that applies; after each reply Stem learns from the git diff and the answer, whichever agent made the change.
+
+Want Stem in another agent? That is the one kind of contribution we take for now: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Safety
 
