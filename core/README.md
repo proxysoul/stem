@@ -79,11 +79,36 @@ Stem learns from its own finished work in this project, with nothing written by 
 - **Familiarity.** When a task ends with changes, Stem links the words of the request to the files it changed. A later request with overlapping words starts with those files, and runs at low reasoning effort when the match is strong.
 - **Clean-checkout baseline.** Between sessions `stem learn` runs the candidate test commands (Stem's default and the runners in `package.json`) on the tests the project's fixes used, on a clean checkout (it skips when there are uncommitted changes). It keeps the command with the fewest failures there, the fastest if several tie, and `$.test` uses it. Tests that fail on a clean checkout are reported as pre-existing.
 - **Nothing stale gets through.** Each item is checked against the code when it is used, never trusted from memory: answers only while the files they cite hash the same; regression fixes only while every "before" is back and every "after" gone (and Stem only re-applies one itself if no commit removed it, since that may have been on purpose); resume edits are re-checked one by one, and the whole resume expires after a day; feedback is marked when its code changed since, and dropped once it is 100 sessions old and changed; familiar files fade with a half-life of 60 sessions and drop when the file is gone. The test runner and known failures are measured again by `stem learn` on a clean checkout. The facts store re-parses any file whose size or time changed before every query.
+- **Tasks, not turns.** A short follow-up like "continue" or "yes" joins the task it continues: Stem matches and stores it under the task's real request, so a chain of "continue" turns teaches as much as one request. Secrets, dotfiles and `tmp-`/`scratch-` files are never learned, and one task keeps at most 40 fixes.
 - `stem learn <request>` prints the note Stem would give for that request. It only shows; it never changes files.
 
 Measured on `bench/seq` (see `bench/README.md`), each idea where it applies: continuing a stopped session costs 60% less, a regression 36% less (with the learned test runner), a question asked again in other words 59% less, a new bug in familiar code 31% less (with the runner), all at the same fix rate and faster; a rejected fix asked again passes 6/6 instead of 1/6. A new feature in familiar code costs 39% less but passed 22/24 against 24/24. Ideas that cost more than they saved were removed and are listed there.
 
 `$.save` still keeps project functions with anchors, versions and stale marks; Stem no longer asks for them on its own.
+
+## Rules
+
+Every `$` call can pass through your own rules first: `.stem/rules.json` in the project, then `~/.stem/rules.json`. The first rule that matches wins.
+
+```json
+{"rules": [
+  {"name": "no-dist-writes", "match": {"call": ["write", "edit"], "pattern": "^dist/"}, "action": "deny", "reason": "dist/ is build output"},
+  {"name": "grep-via-index", "match": {"call": "sh", "pattern": "^\\s*grep -rn (\\S+) (\\S+)\\s*$"}, "action": "redirect", "redirect": {"call": "grep", "args": {"pattern": "$1", "path": "$2"}}},
+  {"name": "npm-to-bun", "match": {"call": "sh", "pattern": "^npm test"}, "action": "rewrite", "rewrite": {"from": "^npm test", "to": "bun test"}}
+]}
+```
+
+- `match.call` is one call name, a list, or `"*"`.
+- `pattern` is a regex over the command (`sh`), the path (`read`, `write`, `edit`, `remove`), the pattern (`grep`), the filter (`test`), the script (`run`) or the query (`sql`).
+- Actions:
+  - `deny` refuses the call with the reason;
+  - `rewrite` replaces the matched text, and `$1` works;
+  - `redirect` runs another `$` call instead, filling `$1`, `$2` from the pattern;
+  - `allow` stops later rules.
+- A rewritten or redirected call adds a `[stem]` line to the script's log.
+- A project's own rules cannot `allow`: a cloned repo must not be able to loosen anything. Allow rules live only in `~/.stem/rules.json`.
+- The built-in checks (destructive steps, scratch-only deletes) still run after the rules.
+- Bad rules are reported when Stem starts and skipped.
 
 ## Scripts, not single calls
 

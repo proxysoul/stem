@@ -21,6 +21,20 @@ const RESUME_MIN_WORDS: usize = 3;
 const FIX_CHARS: usize = 400;
 const REGRESS_MIN_WORDS: usize = 2;
 const RESUME_MAX_SECS: u64 = 24 * 3600;
+const FIXES_PER_TASK: usize = 40;
+const SUBSTANTIVE_WORDS: usize = 2;
+
+fn substantive(prompt: &str) -> bool {
+    words(prompt).len() >= SUBSTANTIVE_WORDS
+}
+
+fn learnable(path: &str) -> bool {
+    let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let secret = [".env", ".pem", ".key", ".p12", ".pfx", "id_rsa", "id_ed25519", ".npmrc", ".netrc"].iter().any(|s| name == s.trim_start_matches('.') || name.ends_with(s) || name.starts_with(".env"));
+    let scratch = ["tmp-", "temp-", "scratch-"].iter().any(|p| name.starts_with(p));
+    let hidden = path.split('/').any(|part| part.starts_with('.') && part.len() > 1);
+    !secret && !scratch && !hidden
+}
 const TRAIL_HALF_LIFE: f64 = 60.0;
 const LESSON_MAX_SESSIONS: u64 = 100;
 
@@ -114,6 +128,8 @@ struct State {
     last_prompt: String,
     #[serde(default)]
     changed_at: BTreeMap<String, u64>,
+    #[serde(default)]
+    task: String,
 }
 
 pub struct Warm {
@@ -184,10 +200,22 @@ const STOP: &[&str] = &["this", "that", "with", "from", "when", "then", "should"
 
 fn words(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for w in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
-        let w = w.to_lowercase();
-        if w.chars().count() >= 4 && w.chars().any(|c| c.is_alphabetic()) && !STOP.contains(&w.as_str()) && !out.contains(&w) {
-            out.push(w);
+    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut parts: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for (i, c) in chars.iter().enumerate() {
+            if i > 0 && c.is_uppercase() && chars[i - 1].is_lowercase() && !cur.is_empty() {
+                parts.push(std::mem::take(&mut cur));
+            }
+            cur.push(*c);
+        }
+        parts.push(cur);
+        for p in parts {
+            let w = singular(&p.to_lowercase());
+            if w.chars().count() >= 4 && w.chars().any(|c| c.is_alphabetic()) && !STOP.contains(&w.as_str()) && !out.contains(&w) {
+                out.push(w);
+            }
         }
     }
     out
@@ -585,6 +613,7 @@ impl Learn {
                 None => groups.push((f.request.clone(), f.file.clone(), vec![f.clone()])),
             }
         }
+        let requests: Vec<Vec<String>> = groups.iter().map(|(r, _, _)| words(r)).collect();
         let mut texts: BTreeMap<String, String> = BTreeMap::new();
         let mut found: Vec<(usize, bool, String, String, Vec<Fix>)> = Vec::new();
         for (request, file, fixes) in groups {
@@ -594,7 +623,9 @@ impl Learn {
             }
             let theirs = words(&request);
             let shared = theirs.iter().filter(|w| asked.contains(w)).count();
-            if shared < REGRESS_MIN_WORDS {
+            let distinctive = theirs.iter().filter(|w| asked.contains(w)).any(|w| requests.iter().filter(|r| r.contains(w)).count() <= 1);
+            let names_file = words(&file).iter().any(|w| asked.contains(w));
+            if shared < REGRESS_MIN_WORDS && !distinctive && !names_file {
                 continue;
             }
             let strong = shared * 10 >= theirs.len() * 6;
@@ -660,8 +691,15 @@ impl Learn {
         }
         let files_total = self.state.trails.values().flat_map(|m| m.keys()).collect::<HashSet<_>>().len().max(1) as f64;
         let mut score: BTreeMap<String, (f64, Vec<String>)> = BTreeMap::new();
+        let mut by_word: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
+        for (key, files) in &self.state.trails {
+            let merged = by_word.entry(words(key).into_iter().next().unwrap_or_else(|| key.clone())).or_default();
+            for (f, n) in files {
+                *merged.entry(f.clone()).or_default() += n;
+            }
+        }
         for w in words(prompt) {
-            let Some(m) = self.state.trails.get(&w) else { continue };
+            let Some(m) = by_word.get(&w) else { continue };
             let idf = (files_total / m.len() as f64).ln() + 0.1;
             for (f, n) in m {
                 if !self.root.join(f).is_file() {
@@ -714,7 +752,17 @@ impl Learn {
         self.finish(prompt, finished, 0, answer);
     }
 
+    pub fn task_request(&self, prompt: &str) -> String {
+        if substantive(prompt) || self.state.task.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{}\n{prompt}", self.state.task)
+        }
+    }
+
     pub fn brief(&mut self, prompt: &str) -> Option<String> {
+        let task = self.task_request(prompt);
+        let prompt = task.as_str();
         let warm = self.warm(prompt);
         let files: Vec<String> = warm.as_ref().map(|w| w.files.clone()).unwrap_or_default();
         let mut parts: Vec<String> = Vec::new();
@@ -744,6 +792,11 @@ impl Learn {
         }
         let _lock = self.lock();
         self.reload();
+        let task = self.task_request(prompt);
+        if substantive(prompt) {
+            self.state.task = prompt.chars().take(600).collect();
+        }
+        let prompt = task.as_str();
         self.state.sessions += 1;
         self.state.resume = (!finished && on("resume")).then(|| Resume {
             request: prompt.chars().take(600).collect(),
@@ -753,13 +806,13 @@ impl Learn {
             last_result: self.last_result.chars().rev().take(RESUME_RESULT).collect::<Vec<_>>().into_iter().rev().collect(),
             at: unix_now(),
         });
-        let changed: Vec<String> = self.touched.iter().filter(|t| !is_test_file(t)).cloned().collect();
+        let changed: Vec<String> = self.touched.iter().filter(|t| !is_test_file(t) && learnable(t)).cloned().collect();
         if finished && changed.is_empty() && on("answers") && !answer.trim().is_empty() {
             let cited: Vec<(String, String)> = regex::Regex::new(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9]+")
                 .unwrap()
                 .find_iter(answer)
                 .map(|m| m.as_str().trim_start_matches("./").to_string())
-                .filter(|p| self.root.join(p).is_file())
+                .filter(|p| self.root.join(p).is_file() && learnable(p))
                 .fold(Vec::new(), |mut v, p| {
                     if !v.iter().any(|(x, _)| *x == p) {
                         let hash = content_hash(&self.root.join(&p));
@@ -791,7 +844,7 @@ impl Learn {
                 *self.state.tested.entry(t.clone()).or_default() += 1;
             }
             if on("regress") {
-                for (file, before, after) in &self.edits {
+                for (file, before, after) in self.edits.iter().filter(|(f, _, _)| learnable(f)).take(FIXES_PER_TASK) {
                     let now = std::fs::read_to_string(self.root.join(file)).unwrap_or_default();
                     if edit_state(&now, before, after) == EditState::Present {
                         self.state.fixes.retain(|f| !(f.file == *file && f.before == *before));
