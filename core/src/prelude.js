@@ -8,6 +8,7 @@ globalThis.console = {
 };
 const __call = (name, args) => {
   const r = JSON.parse(__host(name, JSON.stringify(args ?? {})));
+  if (r.note) __logs.push("[stem] " + r.note);
   if (!r.ok) {
     const e = new Error(r.error);
     e.stemCall = name;

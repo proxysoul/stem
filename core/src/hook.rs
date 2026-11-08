@@ -144,20 +144,37 @@ fn log(root: &Path, line: &str) {
     }
 }
 
+const NOTE_CHARS: usize = 16_000;
+
+fn cap(note: &str) -> String {
+    if note.len() <= NOTE_CHARS {
+        return note.to_string();
+    }
+    let mut end = NOTE_CHARS;
+    while !note.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[stem: note cut at {NOTE_CHARS} characters]", &note[..end])
+}
+
 pub fn run(event: &str) -> i32 {
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     let input: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     let cwd = input["cwd"].as_str().map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let root = project_root(&cwd);
-    let session = input["session_id"].as_str().or(input["sessionID"].as_str()).filter(|s| !s.trim().is_empty()).unwrap_or("default").to_string();
+    let base = input["session_id"].as_str().or(input["sessionID"].as_str()).filter(|s| !s.trim().is_empty()).unwrap_or("default");
+    let session = match input["tab_id"].as_str().filter(|t| !t.trim().is_empty()) {
+        Some(tab) => format!("{base}:{tab}"),
+        None => base.to_string(),
+    };
     match event {
         "prompt" | "UserPromptSubmit" => {
             let prompt = input["prompt"].as_str().unwrap_or("").trim();
             if prompt.is_empty() {
                 return 0;
             }
-            if let Some(note) = begin(&root, &session, prompt) {
+            if let Some(note) = begin(&root, &session, prompt).map(|n| cap(&n)) {
                 println!("{}", json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": note}}));
             }
             log(&root, &format!("prompt {session}"));

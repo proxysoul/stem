@@ -7,6 +7,7 @@ mod env;
 mod events;
 mod hook;
 mod integrate;
+mod rules;
 mod facts;
 mod growth;
 mod graft;
@@ -137,7 +138,11 @@ fn main() {
             0
         }
         Some("version") => {
-            println!("stem {}", env!("CARGO_PKG_VERSION"));
+            if args.rest.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::json!({"name": "stem", "version": env!("CARGO_PKG_VERSION"), "hooks": 1, "mcp": MCP_VERSIONS}));
+            } else {
+                println!("stem {}", env!("CARGO_PKG_VERSION"));
+            }
             0
         }
         Some("models") => models(args.rest.first().map(String::as_str)),

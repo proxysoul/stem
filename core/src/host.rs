@@ -76,6 +76,7 @@ pub struct Host {
     board: Board,
     cancel: Arc<AtomicBool>,
     lsp_enabled: bool,
+    rules: crate::rules::Rules,
 }
 
 type HostResult = Result<Value, String>;
@@ -84,7 +85,12 @@ impl Host {
     pub fn new(root: PathBuf, board: Board, cancel: Arc<AtomicBool>, ask_client: Option<Rc<Client>>, yolo: Arc<AtomicBool>, approver: Option<Approver>) -> Host {
         let project = Project::detect(&root);
         let growth = crate::growth::Growth::open(&root);
-        let learn = crate::learn::Learn::open(&root);
+        let mut learn = crate::learn::Learn::open(&root);
+        let rules = crate::rules::Rules::load(&root);
+        for problem in &rules.problems {
+            learn.events.push(("rules_problem".into(), json!({"problem": problem})));
+            eprintln!("stem rules: {problem}");
+        }
         Host {
             root,
             yolo,
@@ -107,6 +113,7 @@ impl Host {
             board,
             cancel,
             lsp_enabled: std::env::var("STEM_LSP").map(|v| v != "off" && v != "0").unwrap_or(true),
+            rules,
         }
     }
 
@@ -121,12 +128,26 @@ impl Host {
             .or(args["name"].as_str())
             .or(args["cmd"].as_str())
             .map(|s| s.chars().take(80).collect());
-        let result = self.call(name, &args);
+        let (outcome, hit) = if self.rules.is_empty() { (crate::rules::Outcome::Run { name: name.to_string(), args: args.clone(), note: None }, None) } else { self.rules.apply(name, &args) };
+        if let Some(hit) = hit {
+            self.learn.events.push(("rule".into(), hit));
+        }
+        let (name, args, note, result) = match outcome {
+            crate::rules::Outcome::Deny(e) => (name.to_string(), args, None, Err(e)),
+            crate::rules::Outcome::Run { name, args, note } => {
+                let result = self.call(&name, &args);
+                (name, args, note, result)
+            }
+        };
+        let name = name.as_str();
         self.learn.observe(name, &args, &result);
-        let reply = match &result {
+        let mut reply = match &result {
             Ok(v) => json!({"ok": true, "value": v}),
             Err(e) => json!({"ok": false, "error": e}),
         };
+        if let Some(n) = note {
+            reply["note"] = json!(n);
+        }
         let text = reply.to_string();
         self.touched += text.len();
         self.board.piece(name, target.as_deref(), text.len(), result.is_ok());
