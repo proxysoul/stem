@@ -23,9 +23,22 @@ const REGRESS_MIN_WORDS: usize = 2;
 const RESUME_MAX_SECS: u64 = 24 * 3600;
 const FIXES_PER_TASK: usize = 40;
 const SUBSTANTIVE_WORDS: usize = 2;
+const TRAIL_FILES_MAX: usize = 10;
+const HUB_SHARE: f64 = 0.25;
+const HUB_MIN_WORDS: usize = 40;
+const HUB_MIN_FILES: usize = 30;
+const FOLLOW_UP: &[&str] = &["continue", "finish", "left", "rest", "next", "alright", "okay", "update", "keep", "going", "more", "whats", "what", "carry", "proceed", "anything", "else", "done", "sure", "please", "thanks"];
 
 fn substantive(prompt: &str) -> bool {
-    words(prompt).len() >= SUBSTANTIVE_WORDS
+    words(prompt).iter().filter(|w| !FOLLOW_UP.contains(&w.as_str())).count() >= SUBSTANTIVE_WORDS
+}
+
+fn trail_target(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let name = Path::new(&lower).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let generated = lower.contains(".generated.") || ["cargo.lock", "bun.lock", "bun.lockb", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum", "poetry.lock"].contains(&name.as_str());
+    let locale = lower.ends_with(".json") && lower.split('/').any(|p| p == "locales" || p == "i18n" || p == "lang");
+    !generated && !locale
 }
 
 fn learnable(path: &str) -> bool {
@@ -698,11 +711,20 @@ impl Learn {
                 *merged.entry(f.clone()).or_default() += n;
             }
         }
-        for w in words(prompt) {
+        let mut linked: BTreeMap<String, usize> = BTreeMap::new();
+        for files in by_word.values() {
+            for f in files.keys() {
+                *linked.entry(f.clone()).or_default() += 1;
+            }
+        }
+        let word_total = by_word.len();
+        let hub = |f: &str| word_total >= HUB_MIN_WORDS && linked.len() >= HUB_MIN_FILES && *linked.get(f).unwrap_or(&0) as f64 / word_total as f64 > HUB_SHARE;
+        let asked = words(prompt);
+        for w in asked.clone() {
             let Some(m) = by_word.get(&w) else { continue };
             let idf = (files_total / m.len() as f64).ln() + 0.1;
             for (f, n) in m {
-                if !self.root.join(f).is_file() {
+                if !self.root.join(f).is_file() || !trail_target(f) || hub(f) {
                     continue;
                 }
                 let age = self.state.sessions.saturating_sub(*self.state.changed_at.get(f).unwrap_or(&self.state.sessions)) as f64;
@@ -712,6 +734,10 @@ impl Learn {
                     e.1.push(w.clone());
                 }
             }
+        }
+        for (f, (s, _)) in score.iter_mut() {
+            let hits = words(f).iter().filter(|w| asked.contains(w)).count();
+            *s *= 1.0 + hits as f64;
         }
         let mut ranked: Vec<(String, (f64, Vec<String>))> = score.into_iter().filter(|(_, (s, _))| *s >= 1.0).collect();
         ranked.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -834,10 +860,13 @@ impl Learn {
             for f in &changed {
                 self.state.changed_at.insert(f.clone(), self.state.sessions);
             }
-            for w in words(prompt).into_iter().take(40) {
+            let asked = words(prompt);
+            let targets: Vec<&String> = changed.iter().filter(|f| trail_target(f)).collect();
+            let targets: Vec<&String> = if targets.len() > TRAIL_FILES_MAX { targets.into_iter().filter(|f| words(f).iter().any(|w| asked.contains(w))).collect() } else { targets };
+            for w in asked.into_iter().take(40) {
                 let entry = self.state.trails.entry(w).or_default();
-                for f in &changed {
-                    *entry.entry(f.clone()).or_default() += 1;
+                for f in &targets {
+                    *entry.entry((*f).clone()).or_default() += 1;
                 }
             }
             for t in &self.tests_run {
