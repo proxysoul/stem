@@ -86,7 +86,17 @@ fn read_pending(root: &Path, session: &str) -> Option<Value> {
     std::fs::read_to_string(pending_path(root, session)).ok().and_then(|t| serde_json::from_str(&t).ok())
 }
 
+pub struct Reported {
+    pub edits: Option<Vec<(String, String, String)>>,
+    pub touched: Option<Vec<String>>,
+    pub tests: Vec<String>,
+}
+
 pub fn end(root: &Path, session: &str, answer: &str, finished: bool) -> Value {
+    end_with(root, session, answer, finished, Reported { edits: None, touched: None, tests: Vec::new() })
+}
+
+pub fn end_with(root: &Path, session: &str, answer: &str, finished: bool, reported: Reported) -> Value {
     let candidates = if session == "default" { vec![pending_path(root, session)] } else { vec![pending_path(root, session), pending_path(root, "default")] };
     let taken = candidates.iter().find_map(|path| {
         let claim = path.with_extension(format!("taken-{}", std::process::id()));
@@ -101,14 +111,25 @@ pub fn end(root: &Path, session: &str, answer: &str, finished: bool) -> Value {
     let prompt = p["prompt"].as_str().unwrap_or("");
     let base = p["base"].as_str().unwrap_or("HEAD");
     let known: Vec<String> = p["untracked"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
-    let (edits, touched) = changes_since(root, base, &known);
+    let (edits, touched) = match (reported.edits, reported.touched) {
+        (Some(edits), Some(touched)) => (edits, touched),
+        (edits, touched) => {
+            let (seen_edits, seen_touched) = changes_since(root, base, &known);
+            (edits.unwrap_or(seen_edits), touched.unwrap_or(seen_touched))
+        }
+    };
     let summary = json!({"request": prompt.chars().take(120).collect::<String>(), "edits": edits.len(), "files": touched});
     let mut learn = Learn::open(root);
+    learn.ran_tests(&reported.tests);
     learn.external(prompt, answer, edits, touched, finished);
     summary
 }
 
 pub fn begin(root: &Path, session: &str, prompt: &str) -> Option<String> {
+    begin_with(root, session, prompt, None)
+}
+
+pub fn begin_with(root: &Path, session: &str, prompt: &str, decide: Option<crate::learn::Decider>) -> Option<String> {
     if let Some(p) = read_pending(root, session) {
         let same = p["prompt"].as_str() == Some(prompt) && now().saturating_sub(p["at"].as_u64().unwrap_or(0)) < REUSE_SECS;
         if same {
@@ -127,6 +148,7 @@ pub fn begin(root: &Path, session: &str, prompt: &str) -> Option<String> {
     crate::events::ensure_ignored(&root.join(".stem"));
     let mut learn = Learn::open(root);
     learn.host = true;
+    learn.decide = decide;
     let note = learn.brief(prompt);
     let pending = json!({"prompt": prompt, "base": snapshot(root), "untracked": untracked(root), "at": now(), "note": note});
     let path = pending_path(root, session);
@@ -146,7 +168,7 @@ fn log(root: &Path, line: &str) {
 
 const NOTE_CHARS: usize = 16_000;
 
-fn cap(note: &str) -> String {
+pub fn cap(note: &str) -> String {
     if note.len() <= NOTE_CHARS {
         return note.to_string();
     }

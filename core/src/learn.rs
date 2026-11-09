@@ -38,7 +38,8 @@ fn trail_target(path: &str) -> bool {
     let name = Path::new(&lower).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let generated = lower.contains(".generated.") || ["cargo.lock", "bun.lock", "bun.lockb", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum", "poetry.lock"].contains(&name.as_str());
     let locale = lower.ends_with(".json") && lower.split('/').any(|p| p == "locales" || p == "i18n" || p == "lang");
-    !generated && !locale
+    let fixture = lower.split('/').any(|p| ["fixtures", "__fixtures__", "__snapshots__", "testdata"].contains(&p));
+    !generated && !locale && !fixture
 }
 
 fn learnable(path: &str) -> bool {
@@ -164,7 +165,12 @@ pub struct Learn {
     pub events: Vec<(String, Value)>,
     pub preview: bool,
     pub host: bool,
+    pub decide: Option<Decider>,
 }
+
+pub type Decider = Box<dyn FnMut(&Value) -> Option<Value>>;
+pub const DECIDE_MIN: f64 = 0.6;
+const DECIDE_FIX_OPTIONS: usize = 8;
 
 struct StateLock(std::fs::File);
 
@@ -312,7 +318,7 @@ impl Learn {
         let dir = root.join(".stem").join("learn");
         let enabled = std::env::var("STEM_LEARN").map(|v| v != "off" && v != "0").unwrap_or(true);
         let state: State = if enabled { std::fs::read_to_string(dir.join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default() } else { State::default() };
-        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false }
+        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None }
     }
 
     fn lock(&self) -> Option<StateLock> {
@@ -526,6 +532,52 @@ impl Learn {
         scored.into_iter().take(ANSWER_CANDIDATES).map(|(_, sure, a)| (sure, a.clone())).collect()
     }
 
+    fn ask(&mut self, kind: &str, question: &str, request: &str, options: &[String]) -> Option<usize> {
+        let decide = self.decide.as_mut()?;
+        if options.is_empty() {
+            return None;
+        }
+        let ids: Vec<String> = (0..options.len()).map(|i| format!("{}{i}", &kind[..1])).collect();
+        let asked = json!({
+            "kind": kind,
+            "question": question,
+            "request": request,
+            "options": ids.iter().zip(options).map(|(id, text)| json!({"id": id, "text": text})).collect::<Vec<_>>(),
+        });
+        let reply = decide(&asked)?;
+        let confidence = reply["confidence"].as_f64().unwrap_or(0.0);
+        let at = ids.iter().position(|id| reply["choice"].as_str() == Some(id.as_str()))?;
+        self.events.push(("learn_decided".into(), json!({"kind": kind, "confidence": confidence, "used": confidence >= DECIDE_MIN})));
+        (confidence >= DECIDE_MIN).then_some(at)
+    }
+
+    fn decided_answer(&mut self, prompt: &str, candidates: &[(bool, Answer)]) -> Option<Answer> {
+        let options: Vec<String> = candidates.iter().map(|(_, a)| a.request.trim().chars().take(200).collect()).collect();
+        let at = self.ask("answer", "Which earlier question, if any, asks exactly the same thing as this request?", prompt, &options)?;
+        candidates.get(at).map(|(_, a)| a.clone())
+    }
+
+    pub fn ran_tests(&mut self, files: &[String]) {
+        for t in files.iter().filter(|t| is_test_file(t)) {
+            if !self.tests_run.contains(t) {
+                self.tests_run.push(t.clone());
+            }
+        }
+    }
+
+    pub fn summary(&self) -> Value {
+        json!({
+            "sessions": self.state.sessions,
+            "fixes": self.state.fixes.len(),
+            "answers": self.state.answers.len(),
+            "lessons": self.state.lessons.len(),
+            "knownFailures": self.state.failures.values().filter(|f| f.clean && f.seen >= KNOWN_AFTER).count(),
+            "familiarWords": self.state.trails.len(),
+            "testCommand": self.state.test_command,
+            "resume": self.state.resume.is_some(),
+        })
+    }
+
     pub fn answer_note(&mut self, chosen: &Answer) -> String {
         self.events.push(("learn_used".into(), json!({"what": "answers"})));
         format!(
@@ -629,6 +681,8 @@ impl Learn {
         let requests: Vec<Vec<String>> = groups.iter().map(|(r, _, _)| words(r)).collect();
         let mut texts: BTreeMap<String, String> = BTreeMap::new();
         let mut found: Vec<(usize, bool, String, String, Vec<Fix>)> = Vec::new();
+        let mut unsure: Vec<(String, String, Vec<Fix>)> = Vec::new();
+        let prune = |fixes: &[Fix]| -> Vec<Fix> { fixes.iter().filter(|f| !fixes.iter().any(|g| g.before.len() > f.before.len() && g.before.contains(f.before.as_str()) && g.after.contains(f.after.as_str()))).cloned().collect() };
         for (request, file, fixes) in groups {
             let now = texts.entry(file.clone()).or_insert_with(|| std::fs::read_to_string(self.root.join(&file)).unwrap_or_default());
             if now.is_empty() || !fixes.iter().all(|f| edit_state(now, &f.before, &f.after) == EditState::Undone) {
@@ -639,11 +693,19 @@ impl Learn {
             let distinctive = theirs.iter().filter(|w| asked.contains(w)).any(|w| requests.iter().filter(|r| r.contains(w)).count() <= 1);
             let names_file = words(&file).iter().any(|w| asked.contains(w));
             if shared < REGRESS_MIN_WORDS && !distinctive && !names_file {
+                unsure.push((request, file, prune(&fixes)));
                 continue;
             }
             let strong = shared * 10 >= theirs.len() * 6;
-            let kept: Vec<Fix> = fixes.iter().filter(|f| !fixes.iter().any(|g| g.before.len() > f.before.len() && g.before.contains(f.before.as_str()) && g.after.contains(f.after.as_str()))).cloned().collect();
-            found.push((shared, strong, request, file, kept));
+            found.push((shared, strong, request, file, prune(&fixes)));
+        }
+        if found.is_empty() && !unsure.is_empty() {
+            unsure.truncate(DECIDE_FIX_OPTIONS);
+            let options: Vec<String> = unsure.iter().map(|(r, file, _)| format!("{} ({file})", r.trim().chars().take(160).collect::<String>())).collect();
+            if let Some(at) = self.ask("fix", "Which earlier fix, if any, is the same bug this request is about? Its code has been undone in the file.", prompt, &options) {
+                let (request, file, kept) = unsure.swap_remove(at);
+                found.push((0, false, request, file, kept));
+            }
         }
         if found.is_empty() {
             return None;
@@ -787,6 +849,7 @@ impl Learn {
     }
 
     pub fn brief(&mut self, prompt: &str) -> Option<String> {
+        let asks_new = substantive(prompt);
         let task = self.task_request(prompt);
         let prompt = task.as_str();
         let warm = self.warm(prompt);
@@ -795,12 +858,19 @@ impl Learn {
         if let Some(r) = self.resume_note(prompt) {
             parts.push(r);
         }
-        if let Some((true, a)) = self.answer_candidates(prompt).into_iter().next() {
-            let note = self.answer_note(&a);
-            parts.push(note);
-        }
-        if let Some(r) = self.regressions(prompt) {
-            parts.push(r);
+        if asks_new {
+            let candidates = self.answer_candidates(prompt);
+            let chosen = match candidates.first() {
+                Some((true, a)) => Some(a.clone()),
+                _ => self.decided_answer(prompt, &candidates),
+            };
+            if let Some(a) = chosen {
+                let note = self.answer_note(&a);
+                parts.push(note);
+            }
+            if let Some(r) = self.regressions(prompt) {
+                parts.push(r);
+            }
         }
         if let Some(l) = self.lessons_for(prompt, &files) {
             self.events.push(("learn_used".into(), json!({"what": "lessons"})));
@@ -819,7 +889,8 @@ impl Learn {
         let _lock = self.lock();
         self.reload();
         let task = self.task_request(prompt);
-        if substantive(prompt) {
+        let asks_new = substantive(prompt);
+        if asks_new {
             self.state.task = prompt.chars().take(600).collect();
         }
         let prompt = task.as_str();
@@ -833,7 +904,7 @@ impl Learn {
             at: unix_now(),
         });
         let changed: Vec<String> = self.touched.iter().filter(|t| !is_test_file(t) && learnable(t)).cloned().collect();
-        if finished && changed.is_empty() && on("answers") && !answer.trim().is_empty() {
+        if asks_new && finished && changed.is_empty() && on("answers") && !answer.trim().is_empty() {
             let cited: Vec<(String, String)> = regex::Regex::new(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9]+")
                 .unwrap()
                 .find_iter(answer)
@@ -863,7 +934,7 @@ impl Learn {
             let asked = words(prompt);
             let targets: Vec<&String> = changed.iter().filter(|f| trail_target(f)).collect();
             let targets: Vec<&String> = if targets.len() > TRAIL_FILES_MAX { targets.into_iter().filter(|f| words(f).iter().any(|w| asked.contains(w))).collect() } else { targets };
-            for w in asked.into_iter().take(40) {
+            for w in asked.into_iter().filter(|w| !FOLLOW_UP.contains(&w.as_str()) && !QUESTION_WORDS.contains(&w.as_str())).take(40) {
                 let entry = self.state.trails.entry(w).or_default();
                 for f in &targets {
                     *entry.entry((*f).clone()).or_default() += 1;
@@ -873,7 +944,7 @@ impl Learn {
                 *self.state.tested.entry(t.clone()).or_default() += 1;
             }
             if on("regress") {
-                for (file, before, after) in self.edits.iter().filter(|(f, _, _)| learnable(f)).take(FIXES_PER_TASK) {
+                for (file, before, after) in self.edits.iter().filter(|(f, before, _)| learnable(f) && !before.trim().is_empty()).take(FIXES_PER_TASK) {
                     let now = std::fs::read_to_string(self.root.join(file)).unwrap_or_default();
                     if edit_state(&now, before, after) == EditState::Present {
                         self.state.fixes.retain(|f| !(f.file == *file && f.before == *before));

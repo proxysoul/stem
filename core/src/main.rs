@@ -6,6 +6,7 @@ mod config;
 mod env;
 mod events;
 mod hook;
+mod plug;
 mod integrate;
 mod rules;
 mod facts;
@@ -96,7 +97,7 @@ fn parse_args() -> Args {
             "-y" | "--yolo" => args.yolo = true,
             "-h" | "--help" => args.command = Some("help".into()),
             "-V" | "--version" => args.command = Some("version".into()),
-            _ if args.rest.is_empty() && args.command.is_none() && matches!(a.as_str(), "models" | "grafts" | "learn" | "stats" | "doctor" | "js" | "mcp" | "tools" | "login" | "hook" | "integrate") => args.command = Some(a),
+            _ if args.rest.is_empty() && args.command.is_none() && matches!(a.as_str(), "models" | "grafts" | "learn" | "stats" | "doctor" | "js" | "mcp" | "tools" | "login" | "hook" | "integrate" | "host") => args.command = Some(a),
             _ => args.rest.push(a),
         }
     }
@@ -139,7 +140,7 @@ fn main() {
         }
         Some("version") => {
             if args.rest.iter().any(|a| a == "--json") {
-                println!("{}", serde_json::json!({"name": "stem", "version": env!("CARGO_PKG_VERSION"), "hooks": 1, "mcp": MCP_VERSIONS}));
+                println!("{}", serde_json::json!({"name": "stem", "version": env!("CARGO_PKG_VERSION"), "hooks": 1, "host": plug::PROTOCOL, "mcp": MCP_VERSIONS}));
             } else {
                 println!("stem {}", env!("CARGO_PKG_VERSION"));
             }
@@ -180,6 +181,7 @@ fn main() {
         }
         Some("mcp") => mcp(&args, &root),
         Some("integrate") => integrate::run(&args.rest, &root),
+        Some("host") => plug::run(&hook::project_root(&root)),
         Some("hook") => hook::run(args.rest.first().map(String::as_str).unwrap_or("")),
         Some("login") => match login(args.rest.first().map(String::as_str)) {
             Ok(_) => {

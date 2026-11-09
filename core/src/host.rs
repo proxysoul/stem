@@ -1768,7 +1768,7 @@ fn dedup(rows: &mut Vec<Value>) {
     rows.retain(|r| seen.insert(format!("{}:{}:{}", r["file"], r["line"], r["text"])));
 }
 
-fn looks_like_test(cmd: &str) -> bool {
+pub fn looks_like_test(cmd: &str) -> bool {
     let c = cmd.to_lowercase();
     ["vitest", "jest", "bun test", "pytest", "cargo test", "go test", "npm test", "npm run test", "bun run test", "pnpm test", "yarn test", "mocha", "ava"].iter().any(|k| c.contains(k))
 }

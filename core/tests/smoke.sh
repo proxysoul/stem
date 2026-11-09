@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 STEM=${STEM:-stem}
+HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 pass() { printf 'ok   %s\n' "$1"; }
@@ -52,4 +53,7 @@ echo '{"session_id":"s2"}' | "$STEM" hook stop
 for f in .claude/settings.json .mcp.json .claude/skills/stem/SKILL.md .codex/hooks.json .codex/config.toml .agents/skills/stem/SKILL.md .opencode/plugins/stem.ts .opencode/skills/stem/SKILL.md opencode.json .pi/extensions/stem.ts .empryo/hooks.json .empryo/config.json; do [ -f "$f" ] || fail "integrate did not write $f"; done
 "$STEM" integrate >/dev/null
 [ "$(grep -c 'stem hook prompt' .claude/settings.json)" = "1" ] && [ "$(grep -c '^\[mcp_servers.stem\]' .codex/config.toml)" = "1" ] && pass "integrate writes every harness and is idempotent" || fail "integrate duplicated hooks"
+if command -v bun >/dev/null; then
+  bun "$HERE/host.ts" "$STEM" >/dev/null && pass "stem host speaks the host protocol" || fail "stem host: run bun $HERE/host.ts $STEM"
+fi
 echo "all smoke checks passed"
