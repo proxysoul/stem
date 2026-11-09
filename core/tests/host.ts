@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -92,6 +93,40 @@ check("non-test tool results pass through", JSON.stringify(tool.result) === "{}"
 
 const status = await call("status");
 check("status counts what was learned", status.result?.fixes >= 1 && status.result.sessions >= 2, status);
+
+writeFileSync(join(dir, "src", "tax.ts"), "export const tax = (n: number) => n * 0.2\n");
+const sha = (file: string) => createHash("sha1").update(readFileSync(join(dir, file))).digest("hex").slice(0, 16);
+const old = join(dir, "empryo-learn.json");
+writeFileSync(
+  old,
+  JSON.stringify({
+    version: 1,
+    fixes: [
+      { file: "src/tax.ts", before: "export const tax = (n: number) => n * 0.1\n", after: "export const tax = (n: number) => n * 0.2\n", request: "tax uses the old ten percent rate", at: 1 },
+      { file: "src/tax.ts", before: "", after: "whole new file", request: "create the tax helper file", at: 2 },
+      { file: "src/tax.ts", before: "x", after: "never applied here", request: "something that was undone later", at: 3 },
+    ],
+    answers: [
+      { words: [], request: "which rate does the tax helper use", answer: "src/tax.ts uses 20%.", files: [["src/tax.ts", sha("src/tax.ts")]], at: 1 },
+      { words: [], request: "yeah go on", answer: "src/tax.ts", files: [["src/tax.ts", sha("src/tax.ts")]], at: 2 },
+      { words: [], request: "where is the price helper defined", answer: "src/price.ts", files: [["src/price.ts", "0000000000000000"]], at: 3 },
+    ],
+    lessons: [{ text: "round tax per line, not on the total", files: ["src/tax.ts"], words: ["round", "tax"], hashes: [["src/tax.ts", sha("src/tax.ts")]], session: 4, at: 1 }],
+    failures: { "discount rounds": { test: "discount rounds", command: "bun test", seen: 2 }, "flaky once": { test: "flaky once", command: "bun test", seen: 1 } },
+    resume: null,
+    trails: { what: { "src/tax.ts": 9 } },
+    last: {},
+  }),
+);
+const imported = await call("learn.import", { path: old, format: "empryo-stem-1" });
+check("learn.import keeps applied fixes, current answers, lessons and clean failures", ["fixes", "answers", "lessons", "knownFailures"].every((k) => imported.result?.[k] === 1), imported);
+const again = await call("learn.import", { path: old, format: "empryo-stem-1" });
+check("learn.import twice adds nothing new", ["fixes", "answers", "lessons", "knownFailures"].every((k) => again.result?.[k] === 0), again);
+const unknown = await call("learn.import", { path: old, format: "other-9" });
+check("learn.import refuses unknown formats", !!unknown.error?.message, unknown);
+const recalled = await call("turn.start", { session: "tab-e", prompt: "which rate does the tax helper use", origin: "user" });
+check("an imported answer comes back for the same question", /earlier answer/.test(recalled.result?.note ?? ""), recalled);
+await call("turn.end", { session: "tab-e", answer: "", finished: true, edits: [], touched: [] });
 
 const bad = await call("nope");
 check("unknown methods return an error, not a crash", !!bad.error?.message, bad);

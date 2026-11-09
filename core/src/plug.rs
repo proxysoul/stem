@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 pub const PROTOCOL: u64 = 1;
 const DEFAULT_DECIDE_MS: u64 = 2_500;
-const METHODS: &[&str] = &["hello", "turn.start", "tool.result", "rule.check", "turn.end", "feedback", "status", "shutdown"];
+const METHODS: &[&str] = &["hello", "learn.import", "turn.start", "tool.result", "rule.check", "turn.end", "feedback", "status", "shutdown"];
 
 fn send(message: &Value) {
     let mut out = std::io::stdout().lock();
@@ -128,6 +128,14 @@ impl Server {
                 let reported = Reported { edits, touched: strings(&params["touched"]), tests: strings(&params["tests"]).unwrap_or_default() };
                 let answer = params["answer"].as_str().unwrap_or("");
                 Ok(end_with(&self.root, &session, answer, params["finished"].as_bool().unwrap_or(true), reported))
+            }
+            "learn.import" => {
+                let format = params["format"].as_str().unwrap_or("");
+                if format != "empryo-stem-1" {
+                    return Err(format!("unknown format {format}; this Stem imports: empryo-stem-1"));
+                }
+                let path = params["path"].as_str().ok_or("missing path")?;
+                Learn::open(&self.root).import_empryo(Path::new(path))
             }
             "feedback" => Ok(Learn::open(&self.root).add_feedback(params["text"].as_str().unwrap_or(""))),
             "status" => Ok(Learn::open(&self.root).summary()),

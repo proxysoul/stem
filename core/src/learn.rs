@@ -565,6 +565,78 @@ impl Learn {
         }
     }
 
+    pub fn import_empryo(&mut self, path: &Path) -> Result<Value, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+        let old: Value = serde_json::from_str(&text).map_err(|e| format!("{} is not JSON: {e}", path.display()))?;
+        if old["version"].as_u64() != Some(1) {
+            return Err(format!("{} is not an Empryo Stem store of version 1", path.display()));
+        }
+        let sha1_of = |file: &str| -> String {
+            use sha1::Digest;
+            std::fs::read(self.root.join(file)).map(|b| sha1::Sha1::digest(&b).iter().take(8).map(|x| format!("{x:02x}")).collect::<String>()).unwrap_or_default()
+        };
+        let carry = |pairs: &Value| -> Option<Vec<(String, String)>> {
+            pairs.as_array()?.iter().map(|p| {
+                let file = p[0].as_str()?;
+                let same = !sha1_of(file).is_empty() && p[1].as_str() == Some(sha1_of(file).as_str());
+                Some((file.to_string(), if same { content_hash(&self.root.join(file)) } else { "changed before import".to_string() }))
+            }).collect()
+        };
+        let fixes: Vec<Fix> = old["fixes"].as_array().into_iter().flatten().filter_map(|f| {
+            let fix = Fix { file: f["file"].as_str()?.to_string(), before: f["before"].as_str()?.to_string(), after: f["after"].as_str()?.to_string(), request: f["request"].as_str()?.chars().take(160).collect() };
+            let now = std::fs::read_to_string(self.root.join(&fix.file)).unwrap_or_default();
+            (learnable(&fix.file) && !fix.before.trim().is_empty() && substantive(&fix.request) && edit_state(&now, &fix.before, &fix.after) == EditState::Present).then_some(fix)
+        }).collect();
+        let answers: Vec<Answer> = old["answers"].as_array().into_iter().flatten().filter_map(|a| {
+            let request = a["request"].as_str()?;
+            let files = carry(&a["files"])?;
+            (substantive(request) && !files.is_empty() && files.iter().all(|(f, h)| learnable(f) && *h == content_hash(&self.root.join(f)))).then(|| Answer { words: words(request), request: request.to_string(), answer: a["answer"].as_str().unwrap_or("").chars().take(ANSWER_CHARS).collect(), files })
+        }).collect();
+        let lessons: Vec<Lesson> = old["lessons"].as_array().into_iter().flatten().filter_map(|l| {
+            let text = l["text"].as_str()?.trim().to_string();
+            let files: Vec<String> = l["files"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            (!text.is_empty()).then(|| Lesson { words: words(&format!("{text} {}", l["words"].as_array().map(|w| w.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default())), hashes: carry(&l["hashes"]).unwrap_or_default(), files, text, session: 0 })
+        }).collect();
+        let failures: Vec<Failure> = old["failures"].as_object().into_iter().flatten().filter_map(|(name, f)| {
+            let seen = f["seen"].as_u64()? as u32;
+            (seen >= KNOWN_AFTER).then(|| Failure { test: f["test"].as_str().unwrap_or(name).to_string(), file: f["command"].as_str().unwrap_or("").to_string(), seen, clean: true })
+        }).collect();
+        let _lock = self.lock();
+        self.reload();
+        let mut added = (0usize, 0usize, 0usize, 0usize);
+        for fix in fixes {
+            if !self.state.fixes.iter().any(|f| f.file == fix.file && f.before == fix.before) {
+                self.state.fixes.insert(0, fix);
+                added.0 += 1;
+            }
+        }
+        self.state.fixes.truncate(MAX_FIXES);
+        for answer in answers {
+            if !self.state.answers.iter().any(|a| a.request == answer.request) {
+                self.state.answers.insert(0, answer);
+                added.1 += 1;
+            }
+        }
+        self.state.answers.truncate(MAX_ANSWERS);
+        for lesson in lessons {
+            if !self.state.lessons.iter().any(|l| l.text == lesson.text) {
+                self.state.lessons.insert(0, lesson);
+                added.2 += 1;
+            }
+        }
+        self.state.lessons.truncate(MAX_LESSONS);
+        for failure in failures {
+            if !self.state.failures.contains_key(&failure.test) {
+                added.3 += 1;
+            }
+            let entry = self.state.failures.entry(failure.test.clone()).or_insert_with(|| failure.clone());
+            entry.seen = entry.seen.max(failure.seen);
+            entry.clean = true;
+        }
+        self.save();
+        Ok(json!({"fixes": added.0, "answers": added.1, "lessons": added.2, "knownFailures": added.3}))
+    }
+
     pub fn summary(&self) -> Value {
         json!({
             "sessions": self.state.sessions,
