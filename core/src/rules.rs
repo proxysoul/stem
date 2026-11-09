@@ -96,6 +96,41 @@ fn fill(value: &Value, caps: &regex::Captures) -> Value {
     }
 }
 
+const SHELL_PATTERN: &str = r#"(?:"([^"]+)"|'([^']+)'|([^\s'"|;&<>$`*?-][^\s|;&<>`]*))"#;
+const SHELL_PATH: &str = r#"([^\s'"|;&<>$`*?\[-][^\s|;&<>`*?\[]*)"#;
+
+fn built_in() -> Vec<Rule> {
+    let search = |name: &str, flags: &str, ignore_case: bool| RawRule {
+        name: name.to_string(),
+        when: Match { call: Calls::One("sh".into()), pattern: Some(format!(r"^\s*(?:git\s+grep|grep|rg)({flags})\s+{SHELL_PATTERN}(?:\s+{SHELL_PATH})?\s*$")) },
+        action: "redirect".into(),
+        reason: None,
+        rewrite: None,
+        redirect: Some(Redirect { call: "grep".into(), args: json!({"pattern": "$2$3$4", "path": "$5", "ignoreCase": ignore_case}) }),
+        note: Some("ran $.grep instead of a shell search: it skips ignored files and returns rows".into()),
+    };
+    let read = RawRule {
+        name: "shell-read".into(),
+        when: Match { call: Calls::One("sh".into()), pattern: Some(format!(r"^\s*cat\s+{SHELL_PATH}\s*$")) },
+        action: "redirect".into(),
+        reason: None,
+        rewrite: None,
+        redirect: Some(Redirect { call: "read".into(), args: json!({"path": "$1"}) }),
+        note: Some("ran $.read instead of cat".into()),
+    };
+    [
+        search("shell-search", r"(?:\s+-[rRnHsE]+)*\s+-[rRnHsE]*i[rRnHisE]*(?:\s+-[rRnHisE]+)*", true),
+        search("shell-search", r"(?:\s+-[rRnHsE]+)*", false),
+        read,
+    ]
+    .into_iter()
+    .filter_map(|raw| {
+        let pattern = Regex::new(raw.when.pattern.as_deref().unwrap_or_default()).ok()?;
+        Some(Rule { raw, pattern: Some(pattern), source: "built-in" })
+    })
+    .collect()
+}
+
 impl Rules {
     pub fn load(root: &Path) -> Rules {
         let mut rules = Vec::new();
@@ -134,6 +169,7 @@ impl Rules {
                 rules.push(Rule { raw: r, pattern, source });
             }
         }
+        rules.extend(built_in());
         Rules { rules, problems }
     }
 
