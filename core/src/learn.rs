@@ -1239,6 +1239,17 @@ impl Learn {
         }
         let _lock = self.lock();
         self.reload();
+        if self.state.prompts_seen == 0 {
+            let mut earlier: Vec<String> = Vec::new();
+            for request in self.state.fixes.iter().map(|f| &f.request).chain(self.state.answers.iter().map(|a| &a.request)) {
+                if !earlier.contains(request) {
+                    earlier.push(request.clone());
+                }
+            }
+            for request in &earlier {
+                self.count_prompt(request);
+            }
+        }
         if !self.continues {
             self.count_prompt(prompt);
         }
