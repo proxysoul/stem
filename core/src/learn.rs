@@ -520,7 +520,9 @@ impl Learn {
             docs.iter().map(|d| asked.iter().filter(|w| d.contains(w)).map(weight).sum::<f64>() / own).collect()
         };
         let asked_words: Vec<String> = words(prompt).into_iter().filter(|w| !QUESTION_WORDS.contains(&w.as_str())).collect();
-        let sure = share(&asked_words, &valid.iter().map(|a| a.words.clone()).collect::<Vec<_>>());
+        let stored: Vec<Vec<String>> = valid.iter().map(|a| a.words.iter().filter(|w| !QUESTION_WORDS.contains(&w.as_str())).cloned().collect()).collect();
+        let covers_asked = share(&asked_words, &stored);
+        let sure: Vec<f64> = stored.iter().zip(&covers_asked).map(|(theirs, forward)| forward.min(share(theirs, std::slice::from_ref(&asked_words))[0])).collect();
         let near = share(&terms(prompt), &valid.iter().map(|a| terms(&format!("{} {}", a.request, a.answer))).collect::<Vec<_>>());
         let mut scored: Vec<(f64, bool, &Answer)> = valid
             .iter()
