@@ -85,3 +85,5 @@ Want Stem in another agent? That is the one kind of contribution we take for now
 
 Sprout says hi.
 </div>
+
+100% native human brain idea + vibe coded code by clanker.
