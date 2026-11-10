@@ -84,6 +84,6 @@ Want Stem in another agent? That is the one kind of contribution we take for now
 <img src="brand/readme/sprout-love.webp" width="96" alt="Sprout, Stem's mascot, with a heart">
 
 Sprout says hi.
-</div>
 
 100% native human brain idea + vibe coded code by clanker.
+</div>
