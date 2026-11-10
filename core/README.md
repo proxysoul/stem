@@ -4,6 +4,8 @@ One Rust binary (6.8 MB release build) with QuickJS inside. It works in the fold
 
 ## Install and start
 
+Prebuilt for macOS and Linux (arm64 and x64). Windows is not supported yet.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/proxysoul/stem/main/install.sh | sh   # prebuilt, checksum-checked
 cargo install --path core          # or from source, into ~/.cargo/bin

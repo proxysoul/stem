@@ -76,7 +76,7 @@ jobs:
             tar xzf "$archive" -C "npm/vendor/$target"
             chmod +x "npm/vendor/$target/stem"
           done
-          cp README.md npm/README.md
+          cp README.md LICENSE npm/
           cd npm
           npm pkg set version="$version"
           test "$(./vendor/x86_64-unknown-linux-gnu/stem --version)" = "stem $version"
