@@ -215,7 +215,7 @@ impl Server {
                 let from = origin(params);
                 let finished = params["finished"].as_bool().unwrap_or(true);
                 let seen = self.seen.remove(&session).unwrap_or_default();
-                let unlearned = |root: &Path| json!({"skipped": "only the user's own requests and the app's continuations of them are learned from", "usageStored": usage_only(root, &session, from, finished, &params["usage"])});
+                let unlearned = |root: &Path| json!({"skipped": "only the user's own requests and the app's continuations of them are learned from", "usageStored": usage_only(root, &session, from, finished, params["shown"].as_bool().unwrap_or(true), &params["usage"])});
                 if from != ORIGIN_USER && from != ORIGIN_ENGINE {
                     return Ok(unlearned(&self.root));
                 }

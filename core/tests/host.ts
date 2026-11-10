@@ -190,9 +190,9 @@ writeFileSync(join(dir, "src", "tax.ts"), newTax);
 const engineEnd = await call("turn.end", { session: "tab-e1", origin: "engine", answer: "Changed the rate.", finished: true, edits: [{ file: "src/tax.ts", before: oldTax, after: newTax }], touched: ["src/tax.ts"], usage: { cost: 2, steps: 5, inputTokens: 3000, cacheRead: 2500, outputTokens: 100 } });
 const fixesAfter = (await call("status")).result.fixes;
 check("the app's own continuation of a task is learned under that task", engineStart.result?.continues === true && engineEnd.result?.edits === 1 && engineEnd.result.usageStored === true && fixesAfter === fixesBefore + 1, { engineStart, engineEnd, fixesBefore, fixesAfter });
-const linkEnd2 = await call("turn.end", { session: "tab-e1", origin: "link", answer: "noted", usage: { cost: 0.5, steps: 1 } });
+const linkEnd2 = await call("turn.end", { session: "tab-e1", origin: "link", answer: "noted", shown: false, usage: { cost: 0.5, steps: 1 } });
 const taskRows = usageRows().filter((r) => r.session === "tab-e1");
-check("every turn's usage is stored with its task, whoever started the turn", !!linkEnd2.result?.skipped && linkEnd2.result.usageStored === true && taskRows.length === 3 && taskRows.map((r) => r.origin).join() === "user,engine,link" && new Set(taskRows.map((r) => r.task)).size === 1 && taskRows[0].task > 0 && taskRows[0].at > 1e12, taskRows);
+check("every turn's usage is stored with its task, whoever started the turn", !!linkEnd2.result?.skipped && linkEnd2.result.usageStored === true && taskRows.length === 3 && taskRows.map((r) => r.origin).join() === "user,engine,link" && new Set(taskRows.map((r) => r.task)).size === 1 && taskRows[0].task > 0 && taskRows[0].at > 1e12 && taskRows[2].shown === false && taskRows[0].shown === true, taskRows);
 const orphan = await call("turn.start", { session: "tab-e2", prompt: "System notice: continue", origin: "engine" });
 check("a continuation with no task behind it starts nothing", !!orphan.result?.skipped && !orphan.result.continues, orphan);
 

@@ -142,10 +142,10 @@ fn fix_triples(list: &Value) -> Vec<(String, String, String)> {
     list.as_array().into_iter().flatten().filter_map(|f| Some((f[0].as_str()?.to_string(), f[1].as_str()?.to_string(), f[2].as_str()?.to_string()))).collect()
 }
 
-pub fn usage_only(root: &Path, session: &str, origin: &str, finished: bool, usage: &Value) -> bool {
+pub fn usage_only(root: &Path, session: &str, origin: &str, finished: bool, shown: bool, usage: &Value) -> bool {
     let mut learn = Learn::open(root);
     learn.session = Some(session.to_string());
-    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], followed: &[], shown: true, finished, usage })
+    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], followed: &[], shown, finished, usage })
 }
 
 pub fn end(root: &Path, session: &str, answer: &str, finished: bool) -> Value {
