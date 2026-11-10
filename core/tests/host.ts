@@ -73,6 +73,7 @@ const silent = await call("turn.start", { session: "tab-d", prompt: "la somme es
 const waited = Date.now() - t0;
 check("a host that never answers decide costs at most decideMs", waited < 3500 && !/again has the code/.test(silent.result?.note ?? ""), { waited, silent });
 await call("turn.end", { session: "tab-d", answer: "", finished: true, edits: [], touched: [] });
+answerDecide = () => ({ choice: null, confidence: 0 });
 
 const follow = await call("turn.start", { session: "tab-a", prompt: "yeah cook it", origin: "user" });
 check("a short follow-up gets no recalled fix or answer", !/again has the code|earlier answer/.test(follow.result?.note ?? ""), follow);
@@ -141,7 +142,8 @@ const firstHabit = await habitTurn("tab-h1", "src/tax.ts", "change the tax helpe
 const secondHabit = await habitTurn("tab-h2", "src/price.ts", "make the price helper handle negative quantities");
 const earlyHabit = await habitTurn("tab-h0", "src/price.ts", "price helper should round to two decimals");
 const thirdHabit = await habitTurn("tab-h3", "src/tax.ts", "tax helper should accept a custom rate");
-check("a check command is not suggested before three turns used it", firstHabit === "" && secondHabit === "" && earlyHabit === "", { firstHabit, secondHabit, earlyHabit });
+check("feedback on an earlier fix comes back when its file is edited", firstHabit.includes("round tax per line") && !secondHabit.includes("round tax per line"), { firstHabit, secondHabit });
+check("a check command is not suggested before three turns used it", [firstHabit, secondHabit, earlyHabit].every((n) => !n.includes("checked their work")), { firstHabit, secondHabit, earlyHabit });
 check("after three turns the usual check is offered on the first edit there", thirdHabit.includes("cd src && bun run lint <file>") && !thirdHabit.includes("git status") && !thirdHabit.includes("ls src"), thirdHabit);
 await call("turn.start", { session: "tab-h4", prompt: "tax helper should reject negative amounts", origin: "user" });
 const once = await call("rule.check", { session: "tab-h4", call: "edit", args: { path: "src/tax.ts" } });
@@ -168,13 +170,99 @@ check("a test that fails twice on a clean tree is then reported as not caused by
 
 const measured = await call("status");
 const byNote = measured.result?.usage?.byNote ?? {};
-check("status reports turns, median cost and tokens per note kind", measured.result?.usage?.turns === 5 && byNote.none?.turns === 1 && byNote.none.medianCost === 0.5 && byNote.none.medianTokens === 1000 && byNote.none.medianRepeatReads === 2 && byNote.habits?.turns === 1 && byNote.trail?.turns === 1 && byNote.trail.medianSteps === 1, measured.result?.usage);
+check("status reports turns, median cost and tokens per note kind", measured.result?.usage?.turns === 5 && byNote.habits?.turns === 1 && byNote.habits.medianCost === 0.5 && byNote.habits.medianTokens === 1000 && byNote.habits.medianRepeatReads === 2 && byNote.habits.followed === 1 && byNote.trail?.turns === 1 && byNote.trail.medianSteps === 1, measured.result?.usage);
 check("status lists the project's usual checks", measured.result?.habits?.[0]?.area === "src" && measured.result.habits[0].checks[0].cmd === "cd src && bun run lint <file>", measured.result?.habits);
+
+const usageRows = () => readFileSync(join(dir, ".stem", "learn", "usage.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+const middle = (values: number[]) => {
+  const sorted = values.filter((v) => typeof v === "number").sort((x, y) => x - y);
+  if (!sorted.length) return null;
+  return sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+};
+
+const fixesBefore = (await call("status")).result.fixes;
+await call("turn.start", { session: "tab-e1", prompt: "tax helper should use the new quarter rate", origin: "user" });
+await call("turn.end", { session: "tab-e1", answer: "Looked at src/tax.ts, not changed yet.", finished: true, edits: [], touched: [], usage: { cost: 1, steps: 3, inputTokens: 1000, cacheRead: 900, outputTokens: 50 } });
+const engineStart = await call("turn.start", { session: "tab-e1", prompt: "System notice: your answer listed work that is not done. Continue.", origin: "engine" });
+const oldTax = "export const tax = (n: number) => n * 0.2\n";
+const newTax = "export const tax = (n: number) => n * 0.25\n";
+writeFileSync(join(dir, "src", "tax.ts"), newTax);
+const engineEnd = await call("turn.end", { session: "tab-e1", origin: "engine", answer: "Changed the rate.", finished: true, edits: [{ file: "src/tax.ts", before: oldTax, after: newTax }], touched: ["src/tax.ts"], usage: { cost: 2, steps: 5, inputTokens: 3000, cacheRead: 2500, outputTokens: 100 } });
+const fixesAfter = (await call("status")).result.fixes;
+check("the app's own continuation of a task is learned under that task", engineStart.result?.continues === true && engineEnd.result?.edits === 1 && engineEnd.result.usageStored === true && fixesAfter === fixesBefore + 1, { engineStart, engineEnd, fixesBefore, fixesAfter });
+const linkEnd2 = await call("turn.end", { session: "tab-e1", origin: "link", answer: "noted", usage: { cost: 0.5, steps: 1 } });
+const taskRows = usageRows().filter((r) => r.session === "tab-e1");
+check("every turn's usage is stored with its task, whoever started the turn", !!linkEnd2.result?.skipped && linkEnd2.result.usageStored === true && taskRows.length === 3 && taskRows.map((r) => r.origin).join() === "user,engine,link" && new Set(taskRows.map((r) => r.task)).size === 1 && taskRows[0].task > 0 && taskRows[0].at > 1e12, taskRows);
+const orphan = await call("turn.start", { session: "tab-e2", prompt: "System notice: continue", origin: "engine" });
+check("a continuation with no task behind it starts nothing", !!orphan.result?.skipped && !orphan.result.continues, orphan);
+
+const withheldStart = await call("turn.start", { session: "tab-s1", prompt: "tax helper should accept a custom rate", origin: "user" });
+const withheldKind = withheldStart.result?.kinds?.[0];
+const shownBefore = (await call("status")).result.usage.byNote[withheldKind]?.turns ?? 0;
+await call("turn.end", { session: "tab-s1", answer: "", finished: true, edits: [], touched: [], shown: false, usage: { cost: 9, steps: 4 } });
+const afterWithheld = (await call("status")).result.usage;
+check("a note the app did not show is counted apart from shown notes", !!withheldKind && afterWithheld.notShown[withheldKind]?.turns === 1 && afterWithheld.notShown[withheldKind].medianCost === 9 && (afterWithheld.byNote[withheldKind]?.turns ?? 0) === shownBefore, { withheldStart, afterWithheld });
+
+const recount: Record<string, any[]> = {};
+for (const row of usageRows()) {
+  const where = row.kinds.length === 0 ? ["none"] : row.shown === false ? [] : row.kinds;
+  for (const kind of where) (recount[kind] ??= []).push(row);
+}
+const reported = afterWithheld.byNote;
+const agrees = Object.entries(recount).every(([kind, rows]) => {
+  const s = reported[kind];
+  return (
+    s?.turns === rows.length &&
+    s.medianCost === middle(rows.map((r) => r.cost)) &&
+    s.medianTokens === middle(rows.filter((r) => r.inputTokens != null).map((r) => r.inputTokens + (r.outputTokens ?? 0))) &&
+    s.medianFreshTokens === middle(rows.filter((r) => r.inputTokens != null).map((r) => Math.max(0, r.inputTokens - (r.cacheRead ?? 0)) + (r.outputTokens ?? 0))) &&
+    s.medianSteps === middle(rows.map((r) => r.steps))
+  );
+});
+check("status usage equals an independent recount of the usage log", agrees && Object.keys(reported).length === Object.keys(recount).length && afterWithheld.turns === usageRows().length, { reported, recount: Object.fromEntries(Object.entries(recount).map(([k, r]) => [k, r.length])) });
+const e1 = afterWithheld.tasks;
+check("status also reports cost per task", e1.count >= 2 && typeof e1.byNote === "object" && Object.values(e1.byNote).every((s: any) => s.tasks > 0), e1);
+
+answerDecide = () => ({ choice: null, confidence: 0 });
+writeFileSync(join(dir, "src", "tax.ts"), oldTax);
+const elsewhere = await call("turn.start", { session: "tab-r1", prompt: "rendre le bouton plus grand", origin: "user" });
+const onRead = await call("rule.check", { session: "tab-r1", call: "read", args: { path: "src/tax.ts" } });
+const onSecondRead = await call("rule.check", { session: "tab-r1", call: "read", args: { path: "src/tax.ts" } });
+writeFileSync(join(dir, "src", "tax.ts"), newTax);
+const reapplied = await call("turn.end", { session: "tab-r1", answer: "", finished: true, edits: [], touched: ["src/tax.ts"], usage: { cost: 1, steps: 2 } });
+check("an undone fix is pointed out when its file is opened, once, whatever the request says", !/again has/.test(elsewhere.result?.note ?? "") && /src\/tax\.ts:1 again has code that an earlier fix replaced/.test(onRead.result?.note ?? "") && onRead.result.action === "run" && !onSecondRead.result?.note, { elsewhere, onRead, onSecondRead });
+check("turn end says which notes were acted on", reapplied.result?.kinds?.includes("regress") && reapplied.result.followed?.includes("regress"), reapplied);
+
+await call("turn.start", { session: "tab-t1", prompt: "continue", origin: "user", task: "Make the tax helper configurable per country" });
+await call("turn.end", { session: "tab-t1", answer: "Did the first half.", finished: true, edits: [], touched: ["src/tax.ts"] });
+const hinted = await call("turn.start", { session: "tab-t1", prompt: "continue", origin: "user" });
+check("a follow-up in a conversation Stem has not seen takes the app's task for it", /continues the task: Make the tax helper configurable per country/.test(hinted.result?.note ?? ""), hinted);
+await call("turn.end", { session: "tab-t1", answer: "", finished: true, edits: [], touched: [] });
 
 const bad = await call("nope");
 check("unknown methods return an error, not a crash", !!bad.error?.message, bad);
 
 await call("shutdown");
+
+const second = spawn(stem, ["host"], { cwd: dir, stdio: ["pipe", "pipe", "inherit"] });
+const secondWaiting = new Map<string, (v: any) => void>();
+createInterface({ input: second.stdout }).on("line", (line) => {
+  const msg = JSON.parse(line);
+  secondWaiting.get(String(msg.id))?.(msg);
+});
+const call2 = (method: string, params: object = {}) =>
+  new Promise<any>((resolve) => {
+    const id = String(++next);
+    secondWaiting.set(id, resolve);
+    second.stdin.write(JSON.stringify({ id, method, params }) + "\n");
+  });
+await call2("hello", { protocol: 1, capabilities: ["edits"] });
+await call2("turn.start", { session: "tab-x1", prompt: "price helper should round half up everywhere", origin: "user" });
+const pending = JSON.parse(readFileSync(join(dir, ".stem", "learn", "pending", "tab-x1.json"), "utf8"));
+writeFileSync(join(dir, "src", "tax.ts"), "export const tax = (n: number) => n * 0.3\n");
+const ownOnly = await call2("turn.end", { session: "tab-x1", answer: "", finished: true });
+check("an app that reports its own edits gets no git snapshot and no diff of other work", pending.base === null && ownOnly.result?.edits === 0 && ownOnly.result.files.length === 0, { base: pending.base, ownOnly });
+await call2("shutdown");
 const failed = checks.filter(([, ok]) => !ok);
 for (const [name, ok, seen] of checks) console.log(`${ok ? "ok  " : "FAIL"} ${name}${seen ? " " + JSON.stringify(seen).slice(0, 400) : ""}`);
 console.log(`${checks.length - failed.length}/${checks.length} passed`);

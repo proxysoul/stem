@@ -23,6 +23,7 @@ mod sandbox;
 mod servers;
 mod sys;
 mod ui;
+mod usage;
 
 use agent::{Session, TurnReport};
 use catalog::Catalog;

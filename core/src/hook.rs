@@ -94,6 +94,10 @@ pub struct Reported {
     pub usage: Value,
     pub checks: Vec<(String, Option<bool>)>,
     pub kinds: Vec<String>,
+    pub offered_checks: Vec<String>,
+    pub noted_regress: Vec<(String, String, String)>,
+    pub shown: Option<bool>,
+    pub origin: Option<String>,
 }
 
 #[derive(Default)]
@@ -102,76 +106,46 @@ pub struct Started {
     pub kinds: Vec<String>,
     pub answer: Option<Value>,
     pub familiarity: Option<Value>,
+    pub noted_regress: Vec<(String, String, String)>,
 }
 
-const USAGE_FIELDS: &[&str] = &["model", "effort", "inputTokens", "outputTokens", "cacheRead", "cacheWrite", "cost", "steps", "toolOutputChars", "repeatReads", "durationMs"];
-const USAGE_MAX_BYTES: u64 = 4_000_000;
-const USAGE_KEEP_LINES: usize = 4_000;
-
-fn usage_path(root: &Path) -> PathBuf {
-    root.join(".stem").join("learn").join("usage.jsonl")
+#[derive(Default)]
+pub struct Begin<'a> {
+    pub decide: Option<crate::learn::Decider>,
+    pub without_snapshot: bool,
+    pub task: Option<&'a str>,
 }
 
-fn record_usage(root: &Path, session: &str, kinds: &Value, finished: bool, usage: &Value) {
-    use std::io::Write;
-    let Some(given) = usage.as_object() else { return };
-    let mut row = serde_json::Map::new();
-    row.insert("at".into(), json!(now()));
-    row.insert("session".into(), json!(session));
-    row.insert("kinds".into(), if kinds.is_array() { kinds.clone() } else { json!([]) });
-    row.insert("finished".into(), json!(finished));
-    for field in USAGE_FIELDS {
-        if let Some(v) = given.get(*field).filter(|v| v.is_number() || v.is_string()) {
-            row.insert((*field).into(), v.clone());
-        }
+const ORIGIN_USER: &str = "user";
+const ANSWER_FOLLOWED_STEPS: u64 = 2;
+
+fn working_tree(root: &Path, skip: bool) -> (Option<String>, Vec<String>) {
+    if skip {
+        return (None, Vec::new());
     }
-    let path = usage_path(root);
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > USAGE_MAX_BYTES) {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let lines: Vec<&str> = text.lines().collect();
-            let _ = std::fs::write(&path, format!("{}\n", lines[lines.len().saturating_sub(USAGE_KEEP_LINES)..].join("\n")));
-        }
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", Value::Object(row));
-    }
+    std::thread::scope(|scope| {
+        let base = scope.spawn(|| snapshot(root));
+        let others = untracked(root);
+        (base.join().unwrap_or(None), others)
+    })
 }
 
-fn median(mut values: Vec<f64>) -> Option<f64> {
-    if values.is_empty() {
-        return None;
+fn write_pending(root: &Path, session: &str, pending: &Value) {
+    let path = pending_path(root, session);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some(values[values.len() / 2])
+    let _ = std::fs::write(path, pending.to_string());
 }
 
-pub fn usage_summary(root: &Path) -> Value {
-    let rows: Vec<Value> = std::fs::read_to_string(usage_path(root)).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-    let mut groups: std::collections::BTreeMap<String, Vec<&Value>> = std::collections::BTreeMap::new();
-    for row in &rows {
-        let kinds: Vec<&str> = row["kinds"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-        if kinds.is_empty() {
-            groups.entry("none".into()).or_default().push(row);
-        }
-        for kind in kinds {
-            groups.entry(kind.to_string()).or_default().push(row);
-        }
-    }
-    let number = |rows: &[&Value], pick: &dyn Fn(&Value) -> Option<f64>| median(rows.iter().filter_map(|r| pick(r)).collect());
-    let by_note: serde_json::Map<String, Value> = groups
-        .iter()
-        .map(|(kind, rows)| {
-            let stats = json!({
-                "turns": rows.len(),
-                "medianCost": number(rows, &|r| r["cost"].as_f64()),
-                "medianTokens": number(rows, &|r| Some(r["inputTokens"].as_f64()? + r["outputTokens"].as_f64().unwrap_or(0.0))),
-                "medianSteps": number(rows, &|r| r["steps"].as_f64()),
-                "medianRepeatReads": number(rows, &|r| r["repeatReads"].as_f64()),
-            });
-            (kind.clone(), stats)
-        })
-        .collect();
-    json!({"turns": rows.len(), "byNote": by_note})
+fn fix_triples(list: &Value) -> Vec<(String, String, String)> {
+    list.as_array().into_iter().flatten().filter_map(|f| Some((f[0].as_str()?.to_string(), f[1].as_str()?.to_string(), f[2].as_str()?.to_string()))).collect()
+}
+
+pub fn usage_only(root: &Path, session: &str, origin: &str, finished: bool, usage: &Value) -> bool {
+    let mut learn = Learn::open(root);
+    learn.session = Some(session.to_string());
+    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], followed: &[], shown: true, finished, usage })
 }
 
 pub fn end(root: &Path, session: &str, answer: &str, finished: bool) -> Value {
@@ -191,32 +165,62 @@ pub fn end_with(root: &Path, session: &str, answer: &str, finished: bool, report
     let _ = std::fs::remove_file(&claim);
     crate::growth::Growth::open(root).new_session();
     let prompt = p["prompt"].as_str().unwrap_or("");
-    let base = p["base"].as_str().unwrap_or("HEAD");
     let known: Vec<String> = p["untracked"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
-    let (edits, touched) = match (reported.edits, reported.touched) {
-        (Some(edits), Some(touched)) => (edits, touched),
-        (edits, touched) => {
+    let (edits, touched) = match (reported.edits, reported.touched, p["base"].as_str()) {
+        (Some(edits), Some(touched), _) => (edits, touched),
+        (edits, touched, Some(base)) => {
             let (seen_edits, seen_touched) = changes_since(root, base, &known);
             (edits.unwrap_or(seen_edits), touched.unwrap_or(seen_touched))
         }
+        (edits, touched, None) => (edits.unwrap_or_default(), touched.unwrap_or_default()),
     };
-    let summary = json!({"request": prompt.chars().take(120).collect::<String>(), "edits": edits.len(), "files": touched});
-    let mut kinds: Vec<Value> = p["kinds"].as_array().cloned().unwrap_or_default();
-    kinds.extend(reported.kinds.iter().map(|k| json!(k)).filter(|k| !kinds.contains(k)).collect::<Vec<_>>());
-    record_usage(root, session, &json!(kinds), finished, &reported.usage);
+    let mut kinds: Vec<String> = p["kinds"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string)).collect();
+    for kind in &reported.kinds {
+        if !kinds.contains(kind) {
+            kinds.push(kind.clone());
+        }
+    }
+    let has = |kind: &str| kinds.iter().any(|k| k == kind);
+    let mut regress = fix_triples(&p["regress"]);
+    regress.extend(reported.noted_regress.iter().cloned());
+    let reapplied = !regress.is_empty() && regress.iter().all(|(file, before, after)| std::fs::read_to_string(root.join(file)).is_ok_and(|now| crate::learn::applied(&now, before, after)));
+    let wrote_familiar = p["familiar"].as_array().into_iter().flatten().filter_map(Value::as_str).any(|f| touched.iter().any(|t| t == f));
+    let ran_usual = reported.checks.iter().any(|(cmd, _)| crate::habits::checks_in(cmd, &touched).iter().any(|c| reported.offered_checks.contains(c)));
+    let answered_directly = finished && touched.is_empty() && reported.usage["steps"].as_u64().is_some_and(|s| s <= ANSWER_FOLLOWED_STEPS);
+    let reread_nothing = finished && reported.usage["repeatReads"].as_u64() == Some(0);
+    let outcomes = [("familiar", wrote_familiar), ("regress", reapplied), ("habits", ran_usual), ("answer", answered_directly), ("resume", finished), ("trail", reread_nothing)];
+    let followed: Vec<String> = outcomes.iter().filter(|(kind, did)| *did && has(kind)).map(|(kind, _)| kind.to_string()).collect();
+    let mut summary = json!({"request": prompt.chars().take(120).collect::<String>(), "edits": edits.len(), "files": touched, "kinds": kinds, "followed": followed});
     let mut learn = Learn::open(root);
     learn.session = Some(session.to_string());
+    learn.continues = p["continues"].as_bool().unwrap_or(false);
+    learn.task_hint = p["task"].as_str().map(str::to_string);
     learn.ran_tests(&reported.tests);
     learn.checks_run = reported.checks;
     learn.external(prompt, answer, edits, touched, finished, reported.usage["steps"].as_u64().unwrap_or(0) as usize);
+    let origin = reported.origin.as_deref().unwrap_or(ORIGIN_USER);
+    let turn = crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &kinds, followed: &followed, shown: reported.shown.unwrap_or(true), finished, usage: &reported.usage };
+    summary["usageStored"] = json!(crate::usage::record(root, &turn));
     summary
 }
 
 pub fn begin(root: &Path, session: &str, prompt: &str) -> Option<String> {
-    begin_with(root, session, prompt, None).note
+    begin_with(root, session, prompt, Begin::default()).note
 }
 
-pub fn begin_with(root: &Path, session: &str, prompt: &str, decide: Option<crate::learn::Decider>) -> Started {
+pub fn continue_task(root: &Path, session: &str, without_snapshot: bool) -> bool {
+    let mut learn = Learn::open(root);
+    learn.session = Some(session.to_string());
+    let Some(task) = learn.current_task() else { return false };
+    if read_pending(root, session).is_some() {
+        end(root, session, "", false);
+    }
+    let (base, others) = working_tree(root, without_snapshot);
+    write_pending(root, session, &json!({"prompt": task, "continues": true, "base": base, "untracked": others, "at": now(), "kinds": []}));
+    true
+}
+
+pub fn begin_with(root: &Path, session: &str, prompt: &str, options: Begin) -> Started {
     if let Some(p) = read_pending(root, session) {
         let same = p["prompt"].as_str() == Some(prompt) && now().saturating_sub(p["at"].as_u64().unwrap_or(0)) < REUSE_SECS;
         if same {
@@ -235,19 +239,20 @@ pub fn begin_with(root: &Path, session: &str, prompt: &str, decide: Option<crate
     crate::events::ensure_ignored(&root.join(".stem"));
     let mut learn = Learn::open(root);
     learn.host = true;
-    learn.decide = decide;
+    learn.decide = options.decide;
     learn.session = Some(session.to_string());
+    learn.task_hint = options.task.map(str::to_string);
     let note = learn.brief(prompt);
     let kinds = learn.note_kinds();
-    let pending = json!({"prompt": prompt, "base": snapshot(root), "untracked": untracked(root), "at": now(), "note": note, "kinds": kinds});
-    let path = pending_path(root, session);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, pending.to_string());
+    let (base, others) = working_tree(root, options.without_snapshot);
+    write_pending(
+        root,
+        session,
+        &json!({"prompt": prompt, "base": base, "untracked": others, "at": now(), "note": note, "kinds": kinds, "familiar": learn.noted_familiar, "regress": learn.noted_regress, "task": options.task}),
+    );
     let answer = learn.offered.as_ref().map(|(a, sure)| json!({"text": a.answer, "request": a.request, "files": a.files.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(), "sure": sure}));
     let familiarity = learn.familiarity.map(|score| json!({"score": (score * 100.0).round() / 100.0, "priorSteps": learn.prior_steps()}));
-    Started { note, kinds, answer, familiarity }
+    Started { note, kinds, answer, familiarity, noted_regress: learn.noted_regress.clone() }
 }
 
 fn log(root: &Path, line: &str) {

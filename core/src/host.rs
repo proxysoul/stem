@@ -149,7 +149,15 @@ impl Host {
             ("edit" | "write", Ok(_), Some(path)) => self.learn.habits_for(path),
             _ => None,
         };
-        let notes: Vec<String> = note.into_iter().chain(habit).collect();
+        let undone = match (name, &result, args["path"].as_str()) {
+            ("read" | "edit", Ok(_), Some(path)) => self.learn.undone_at(path),
+            _ => None,
+        };
+        let lesson = match (name, &result, args["path"].as_str()) {
+            ("edit" | "write", Ok(_), Some(path)) => self.learn.lessons_at(path),
+            _ => None,
+        };
+        let notes: Vec<String> = note.into_iter().chain(undone).chain(lesson).chain(habit).collect();
         if !notes.is_empty() {
             reply["note"] = json!(notes.join("\n"));
         }
