@@ -1,0 +1,32 @@
+{
+  "name": "@proxysoul/stem",
+  "version": "0.0.0",
+  "description": "Stem: a coding agent that grows its own tools and learns the project it works in.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/proxysoul/stem.git"
+  },
+  "homepage": "https://github.com/proxysoul/stem",
+  "bin": {
+    "stem": "bin/stem.js"
+  },
+  "files": [
+    "bin",
+    "vendor"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}

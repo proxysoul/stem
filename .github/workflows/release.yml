@@ -2,8 +2,7 @@ name: release
 on:
   push:
     tags: ["v*"]
-permissions:
-  contents: write
+  workflow_dispatch:
 jobs:
   build:
     strategy:
@@ -22,13 +21,75 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - run: |
           cd target/${{ matrix.target }}/release
           tar czf stem-${{ matrix.target }}.tar.gz stem
           shasum -a 256 stem-${{ matrix.target }}.tar.gz > stem-${{ matrix.target }}.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stem-${{ matrix.target }}
+          path: core/target/${{ matrix.target }}/release/stem-${{ matrix.target }}.tar.gz*
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            core/target/${{ matrix.target }}/release/stem-${{ matrix.target }}.tar.gz
-            core/target/${{ matrix.target }}/release/stem-${{ matrix.target }}.tar.gz.sha256
+          files: dist/*
+  package:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Assemble the npm package
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' core/Cargo.toml | head -1)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match core/Cargo.toml version $version" >&2
+            exit 1
+          fi
+          for archive in dist/stem-*.tar.gz; do
+            (cd dist && shasum -a 256 -c "$(basename "$archive").sha256")
+            target=$(basename "$archive" .tar.gz)
+            target=${target#stem-}
+            mkdir -p "npm/vendor/$target"
+            tar xzf "$archive" -C "npm/vendor/$target"
+            chmod +x "npm/vendor/$target/stem"
+          done
+          cp README.md npm/README.md
+          cd npm
+          npm pkg set version="$version"
+          test "$(./vendor/x86_64-unknown-linux-gnu/stem --version)" = "stem $version"
+          test "$(node bin/stem.js --version)" = "stem $version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Publish to GitHub Packages
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '@proxysoul:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\n' > .npmrc
+          if npm view "@proxysoul/stem@$VERSION" version >/dev/null 2>&1; then
+            echo "@proxysoul/stem@$VERSION is already published; nothing to do"
+          else
+            npm publish
+          fi
