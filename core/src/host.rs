@@ -145,8 +145,13 @@ impl Host {
             Ok(v) => json!({"ok": true, "value": v}),
             Err(e) => json!({"ok": false, "error": e}),
         };
-        if let Some(n) = note {
-            reply["note"] = json!(n);
+        let habit = match (name, &result, args["path"].as_str()) {
+            ("edit" | "write", Ok(_), Some(path)) => self.learn.habits_for(path),
+            _ => None,
+        };
+        let notes: Vec<String> = note.into_iter().chain(habit).collect();
+        if !notes.is_empty() {
+            reply["note"] = json!(notes.join("\n"));
         }
         let text = reply.to_string();
         self.touched += text.len();

@@ -3,7 +3,7 @@ use crate::learn::Learn;
 use crate::rules::{Outcome, Rules};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -51,10 +51,27 @@ impl Link {
     }
 }
 
+#[derive(Default)]
+struct Seen {
+    edited: bool,
+    checks: Vec<(String, Option<bool>)>,
+    told: HashSet<String>,
+    kinds: Vec<String>,
+}
+
+impl Seen {
+    fn fired(&mut self, kind: &str) {
+        if !self.kinds.iter().any(|k| k == kind) {
+            self.kinds.push(kind.to_string());
+        }
+    }
+}
+
 struct Server {
     root: PathBuf,
     link: Rc<RefCell<Link>>,
     decide_ms: Option<u64>,
+    seen: HashMap<String, Seen>,
 }
 
 fn strings(v: &Value) -> Option<Vec<String>> {
@@ -90,12 +107,27 @@ impl Server {
                     return Ok(json!({"note": null, "skipped": if prompt.is_empty() { "empty prompt" } else { "only the user's own requests start or steer a task" }}));
                 }
                 crate::events::ensure_ignored(&self.root.join(".stem"));
-                let note = begin_with(&self.root, &session, prompt, self.decider()).map(|n| cap(&n));
-                Ok(json!({"note": note}))
+                self.seen.insert(session.clone(), Seen::default());
+                let started = begin_with(&self.root, &session, prompt, self.decider());
+                let mut result = json!({"note": started.note.map(|n| cap(&n)), "kinds": started.kinds});
+                if let Some(answer) = started.answer {
+                    result["answer"] = answer;
+                }
+                if let Some(familiarity) = started.familiarity {
+                    result["familiarity"] = familiarity;
+                }
+                Ok(result)
             }
             "tool.result" => {
                 let call = params["call"].as_str().unwrap_or("");
                 let command = params["args"]["cmd"].as_str().unwrap_or("");
+                if let Some(seen) = params["session"].as_str().and_then(|s| self.seen.get_mut(s)) {
+                    match call {
+                        "edit" | "write" => seen.edited = true,
+                        "sh" if seen.edited && !command.is_empty() => seen.checks.push((command.to_string(), params["result"]["code"].as_i64().map(|c| c == 0))),
+                        _ => {}
+                    }
+                }
                 if call != "test" && !(call == "sh" && crate::host::looks_like_test(command)) {
                     return Ok(json!({}));
                 }
@@ -104,16 +136,43 @@ impl Server {
                     Value::Object(_) => params["result"].clone(),
                     _ => json!({}),
                 };
+                if params["clean"].as_bool() == Some(true) {
+                    let command = params["args"]["cmd"].as_str().or(params["args"]["filter"].as_str()).unwrap_or("");
+                    let text = format!("{}\n{}", out["out"].as_str().unwrap_or(""), out["err"].as_str().unwrap_or(""));
+                    return Ok(Learn::open(&self.root).saw_clean_run(command, &text));
+                }
                 let before: Vec<String> = out.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
                 Learn::open(&self.root).annotate_test(&mut out);
                 let added: serde_json::Map<String, Value> = out.as_object().map(|o| o.iter().filter(|(k, _)| !before.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
+                if added.contains_key("knownFailures") {
+                    if let Some(seen) = params["session"].as_str().and_then(|s| self.seen.get_mut(s)) {
+                        seen.fired("known");
+                    }
+                }
                 Ok(Value::Object(added))
             }
             "rule.check" => {
                 let call = params["call"].as_str().ok_or("missing call")?;
                 let (outcome, rule) = Rules::load(&self.root).apply(call, &params["args"]);
+                let habit = match (&outcome, params["session"].as_str().and_then(|s| self.seen.get_mut(s)), params["args"]["path"].as_str()) {
+                    (Outcome::Run { name, .. }, Some(seen), Some(path)) if name == "edit" || name == "write" => {
+                        seen.edited = true;
+                        let mut learn = Learn::open(&self.root);
+                        learn.habits_told = std::mem::take(&mut seen.told);
+                        let note = learn.habits_for(path);
+                        seen.told = learn.habits_told;
+                        if note.is_some() {
+                            seen.fired("habits");
+                        }
+                        note
+                    }
+                    _ => None,
+                };
                 Ok(match outcome {
-                    Outcome::Run { name, args, note } => json!({"action": if rule.is_some() { "redirect" } else { "run" }, "call": name, "args": args, "note": note, "rule": rule}),
+                    Outcome::Run { name, args, note } => {
+                        let notes: Vec<String> = note.into_iter().chain(habit).collect();
+                        json!({"action": if rule.is_some() { "redirect" } else { "run" }, "call": name, "args": args, "note": (!notes.is_empty()).then(|| notes.join("\n")), "rule": rule})
+                    }
                     Outcome::Deny(reason) => json!({"action": "deny", "reason": reason, "rule": rule}),
                 })
             }
@@ -125,7 +184,8 @@ impl Server {
                 let edits = params["edits"].as_array().map(|a| {
                     a.iter().filter_map(|e| Some((e["file"].as_str()?.to_string(), e["before"].as_str().unwrap_or("").to_string(), e["after"].as_str().unwrap_or("").to_string()))).collect()
                 });
-                let reported = Reported { edits, touched: strings(&params["touched"]), tests: strings(&params["tests"]).unwrap_or_default() };
+                let seen = self.seen.remove(&session).unwrap_or_default();
+                let reported = Reported { edits, touched: strings(&params["touched"]), tests: strings(&params["tests"]).unwrap_or_default(), usage: params["usage"].clone(), checks: seen.checks, kinds: seen.kinds };
                 let answer = params["answer"].as_str().unwrap_or("");
                 Ok(end_with(&self.root, &session, answer, params["finished"].as_bool().unwrap_or(true), reported))
             }
@@ -138,7 +198,11 @@ impl Server {
                 Learn::open(&self.root).import_empryo(Path::new(path))
             }
             "feedback" => Ok(Learn::open(&self.root).add_feedback(params["text"].as_str().unwrap_or(""))),
-            "status" => Ok(Learn::open(&self.root).summary()),
+            "status" => {
+                let mut summary = Learn::open(&self.root).summary();
+                summary["usage"] = crate::hook::usage_summary(&self.root);
+                Ok(summary)
+            }
             other => Err(format!("unknown method {other}; this Stem speaks: {}", METHODS.join(", "))),
         }
     }
@@ -154,7 +218,7 @@ pub fn run(root: &Path) -> i32 {
         }
     });
     let link = Rc::new(RefCell::new(Link { lines: rx, queued: VecDeque::new(), next: 0 }));
-    let mut server = Server { root: root.to_path_buf(), link: link.clone(), decide_ms: None };
+    let mut server = Server { root: root.to_path_buf(), link: link.clone(), decide_ms: None, seen: HashMap::new() };
     loop {
         let Some(line) = link.borrow_mut().take() else { return 0 };
         if line.trim().is_empty() {

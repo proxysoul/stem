@@ -128,6 +128,49 @@ const recalled = await call("turn.start", { session: "tab-e", prompt: "which rat
 check("an imported answer comes back for the same question", /earlier answer/.test(recalled.result?.note ?? ""), recalled);
 await call("turn.end", { session: "tab-e", answer: "", finished: true, edits: [], touched: [] });
 
+const habitTurn = async (session: string, file: string, prompt: string) => {
+  await call("turn.start", { session, prompt, origin: "user" });
+  const before = await call("rule.check", { session, call: "edit", args: { path: file } });
+  await call("tool.result", { session, call: "sh", args: { cmd: "ls src" }, result: { code: 0 } });
+  await call("tool.result", { session, call: "sh", args: { cmd: `cd src && bun run lint ${file.split("/").pop()} 2>&1 | tail -5` }, result: { code: 0 } });
+  await call("tool.result", { session, call: "sh", args: { cmd: "git status --short" }, result: { code: 0 } });
+  await call("turn.end", { session, answer: "done", finished: true, edits: [], touched: [file], usage: { model: "m", cost: 0.5, inputTokens: 900, outputTokens: 100, steps: 7, repeatReads: 2 } });
+  return String(before.result?.note ?? "");
+};
+const firstHabit = await habitTurn("tab-h1", "src/tax.ts", "change the tax helper rounding rule");
+const secondHabit = await habitTurn("tab-h2", "src/price.ts", "make the price helper handle negative quantities");
+const earlyHabit = await habitTurn("tab-h0", "src/price.ts", "price helper should round to two decimals");
+const thirdHabit = await habitTurn("tab-h3", "src/tax.ts", "tax helper should accept a custom rate");
+check("a check command is not suggested before three turns used it", firstHabit === "" && secondHabit === "" && earlyHabit === "", { firstHabit, secondHabit, earlyHabit });
+check("after three turns the usual check is offered on the first edit there", thirdHabit.includes("cd src && bun run lint <file>") && !thirdHabit.includes("git status") && !thirdHabit.includes("ls src"), thirdHabit);
+await call("turn.start", { session: "tab-h4", prompt: "tax helper should reject negative amounts", origin: "user" });
+const once = await call("rule.check", { session: "tab-h4", call: "edit", args: { path: "src/tax.ts" } });
+const twice = await call("rule.check", { session: "tab-h4", call: "write", args: { path: "src/price.ts" } });
+check("the usual checks are offered once per area per turn", !!once.result?.note && !twice.result?.note, { once, twice });
+await call("turn.end", { session: "tab-h4", answer: "", finished: true, edits: [], touched: [] });
+
+const followUp = await call("turn.start", { session: "tab-h3", prompt: "continue", origin: "user" });
+check("a follow-up gets the task so far: request, files changed, last result", /continues the task: tax helper should accept a custom rate/.test(followUp.result?.note ?? "") && /src\/tax\.ts/.test(followUp.result.note) && followUp.result.kinds.includes("trail"), followUp);
+await call("turn.end", { session: "tab-h3", answer: "", finished: true, edits: [], touched: [], usage: { cost: 0.1, inputTokens: 100, outputTokens: 10, steps: 1 } });
+const otherTab = await call("turn.start", { session: "tab-h9", prompt: "continue", origin: "user" });
+check("another tab's follow-up does not get this tab's task", !/continues the task/.test(otherTab.result?.note ?? ""), otherTab);
+await call("turn.end", { session: "tab-h9", answer: "", finished: true, edits: [], touched: [] });
+
+const sameQuestion = await call("turn.start", { session: "tab-q", prompt: "which rate does the tax helper use", origin: "user" });
+check("a sure earlier answer also comes as its own field", sameQuestion.result?.answer?.sure === true && sameQuestion.result.answer.files.includes("src/tax.ts") && sameQuestion.result.kinds.includes("answer"), sameQuestion);
+await call("turn.end", { session: "tab-q", answer: "", finished: true, edits: [], touched: [] });
+
+const failing = "(fail) discount > rounds half up [1.00ms]\n 1 fail";
+const clean1 = await call("tool.result", { session: "tab-q", call: "sh", args: { cmd: "bun test src" }, result: { out: failing, code: 1 }, clean: true });
+const clean2 = await call("tool.result", { session: "tab-q", call: "sh", args: { cmd: "bun test src" }, result: { out: failing, code: 1 }, clean: true });
+const dirty = await call("tool.result", { session: "tab-q", call: "sh", args: { cmd: "bun test src" }, result: { out: failing, code: 1 } });
+check("a test that fails twice on a clean tree is then reported as not caused by the edit", !clean1.result?.knownFailures && clean2.result?.knownFailures?.length === 1 && dirty.result?.knownFailures?.[0] === "discount > rounds half up" && /clean checkout/.test(dirty.result.note ?? ""), { clean1, clean2, dirty });
+
+const measured = await call("status");
+const byNote = measured.result?.usage?.byNote ?? {};
+check("status reports turns, median cost and tokens per note kind", measured.result?.usage?.turns === 5 && byNote.none?.turns === 1 && byNote.none.medianCost === 0.5 && byNote.none.medianTokens === 1000 && byNote.none.medianRepeatReads === 2 && byNote.habits?.turns === 1 && byNote.trail?.turns === 1 && byNote.trail.medianSteps === 1, measured.result?.usage);
+check("status lists the project's usual checks", measured.result?.habits?.[0]?.area === "src" && measured.result.habits[0].checks[0].cmd === "cd src && bun run lint <file>", measured.result?.habits);
+
 const bad = await call("nope");
 check("unknown methods return an error, not a crash", !!bad.error?.message, bad);
 

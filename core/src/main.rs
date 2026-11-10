@@ -5,6 +5,7 @@ mod claude_native;
 mod config;
 mod env;
 mod events;
+mod habits;
 mod hook;
 mod plug;
 mod integrate;
