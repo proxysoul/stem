@@ -82,6 +82,8 @@ pub struct Check {
     pub runs: u32,
     pub passed: u32,
     pub last: u64,
+    #[serde(default)]
+    pub before: u32,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -165,7 +167,15 @@ pub fn checks_in(cmd: &str, edited: &[String]) -> Vec<String> {
     out
 }
 
-pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<bool>)], session: u64) {
+pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<bool>)], ran_before: &[String], session: u64) {
+    let mut early: Vec<String> = Vec::new();
+    for cmd in ran_before {
+        for check in checks_in(cmd, changed) {
+            if !early.contains(&check) {
+                early.push(check);
+            }
+        }
+    }
     let mut areas: Vec<String> = changed.iter().map(|f| area(f)).collect();
     areas.sort();
     areas.dedup();
@@ -188,6 +198,11 @@ pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<boo
             c.passed += u32::from(*passed);
             c.last = session;
         }
+        for check in &early {
+            if let Some(c) = entry.checks.get_mut(check) {
+                c.before += 1;
+            }
+        }
         while entry.checks.len() > MAX_CHECKS {
             let Some(weakest) = entry.checks.iter().min_by_key(|(_, c)| (c.runs, c.last)).map(|(k, _)| k.clone()) else { break };
             entry.checks.remove(&weakest);
@@ -200,7 +215,7 @@ pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<boo
 }
 
 pub fn usual(area: &Area) -> Vec<(&String, &Check)> {
-    let mut found: Vec<(&String, &Check)> = area.checks.iter().filter(|(_, c)| c.runs >= HABIT_MIN_RUNS && f64::from(c.runs) / f64::from(area.turns.max(1)) >= HABIT_MIN_SHARE).collect();
+    let mut found: Vec<(&String, &Check)> = area.checks.iter().filter(|(_, c)| c.runs >= HABIT_MIN_RUNS && c.before * 2 <= c.runs && f64::from(c.runs) / f64::from(area.turns.max(1)) >= HABIT_MIN_SHARE).collect();
     found.sort_by(|a, b| b.1.runs.cmp(&a.1.runs).then(b.1.last.cmp(&a.1.last)));
     found.truncate(HABITS_SHOWN);
     found

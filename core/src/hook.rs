@@ -93,6 +93,7 @@ pub struct Reported {
     pub tests: Vec<String>,
     pub usage: Value,
     pub checks: Vec<(String, Option<bool>)>,
+    pub checks_before: Vec<String>,
     pub kinds: Vec<String>,
     pub withheld: Vec<String>,
     pub acted: bool,
@@ -203,7 +204,9 @@ pub fn end_with(root: &Path, session: &str, answer: &str, finished: bool, report
     let cites_same = p["answered"].as_array().into_iter().flatten().filter_map(Value::as_str).any(|f| answer.contains(f));
     let answered_directly = finished && touched.is_empty() && (cites_same || reported.usage["steps"].as_u64().is_some_and(|s| s <= ANSWER_FOLLOWED_STEPS));
     let reread_nothing = finished && reported.usage["repeatReads"].as_u64() == Some(0);
-    let outcomes = [("familiar", wrote_familiar), ("regress", reapplied), ("habits", ran_usual), ("answer", answered_directly), ("resume", finished), ("trail", reread_nothing)];
+    let resumed: Vec<&str> = p["resumed"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let went_on = if resumed.is_empty() { finished } else { resumed.iter().any(|f| touched.iter().any(|t| t == f)) };
+    let outcomes = [("familiar", wrote_familiar), ("regress", reapplied), ("habits", ran_usual), ("answer", answered_directly), ("resume", went_on), ("trail", reread_nothing)];
     let followed: Vec<String> = outcomes.iter().filter(|(kind, did)| *did && has(kind)).map(|(kind, _)| kind.to_string()).collect();
     let mut summary = json!({"request": prompt.chars().take(120).collect::<String>(), "edits": edits.len(), "files": touched, "kinds": kinds, "withheld": withheld, "followed": followed});
     let mut learn = Learn::open(root);
@@ -212,6 +215,7 @@ pub fn end_with(root: &Path, session: &str, answer: &str, finished: bool, report
     learn.task_hint = p["task"].as_str().map(str::to_string);
     learn.ran_tests(&reported.tests);
     learn.checks_run = reported.checks;
+    learn.checks_before = reported.checks_before;
     learn.acted = reported.acted || reported.origin.as_deref().is_some_and(|o| o != ORIGIN_USER);
     learn.external(prompt, answer, edits, touched, finished, reported.usage["steps"].as_u64().unwrap_or(0) as usize);
     let origin = reported.origin.as_deref().unwrap_or(ORIGIN_USER);
@@ -270,7 +274,7 @@ pub fn begin_with(root: &Path, session: &str, prompt: &str, options: Begin) -> S
     write_pending(
         root,
         session,
-        &json!({"prompt": prompt, "base": base, "untracked": others, "at": now(), "note": note, "kinds": kinds, "withheld": withheld, "familiar": learn.noted_familiar, "regress": learn.noted_regress, "answered": learn.offered.as_ref().map(|(a, _)| a.files.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>()), "task": options.task}),
+        &json!({"prompt": prompt, "base": base, "untracked": others, "at": now(), "note": note, "kinds": kinds, "withheld": withheld, "familiar": learn.noted_familiar, "resumed": learn.noted_resume, "regress": learn.noted_regress, "answered": learn.offered.as_ref().map(|(a, _)| a.files.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>()), "task": options.task}),
     );
     let answer = learn.offered.as_ref().filter(|_| answer_shown).map(|(a, sure)| json!({"text": a.answer, "request": a.request, "files": a.files.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(), "sure": sure}));
     let familiarity = learn.familiarity.map(|score| json!({"score": (score * 100.0).round() / 100.0, "priorSteps": learn.prior_steps()}));

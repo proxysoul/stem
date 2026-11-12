@@ -22,6 +22,8 @@ type Turn = {
   cacheRead?: number;
   outputTokens?: number;
   repeatReads?: number;
+  stem?: string;
+  commandsPartial?: boolean;
 };
 
 const [project, turnsFile, stem = "stem"] = process.argv.slice(2);
@@ -53,8 +55,17 @@ const call = (method: string, params: object = {}) =>
   });
 
 await call("hello", { protocol: 1, capabilities: ["edits"] });
-const offered: Record<string, number> = {};
-const count = (kinds: string[] = []) => kinds.forEach((kind) => (offered[kind] = (offered[kind] ?? 0) + 1));
+type Tally = Record<string, { turns: number; borneOut: number }>;
+const overall: Tally = {};
+const byMode: Record<string, Tally> = {};
+const NEEDS_EVERY_COMMAND = "habits";
+const count = (tally: Tally, kinds: string[], followed: string[]) => {
+  for (const kind of kinds) {
+    const row = (tally[kind] ??= { turns: 0, borneOut: 0 });
+    row.turns++;
+    if (followed.includes(kind)) row.borneOut++;
+  }
+};
 for (const turn of turns) {
   const { session, origin = "user" } = turn;
   const commands = turn.commands ?? [];
@@ -66,18 +77,29 @@ for (const turn of turns) {
   for (const command of commands.filter((c) => c.afterFirstWrite)) await ran(command);
   const usage = { steps: turn.steps, cost: turn.cost, inputTokens: turn.inputTokens, cacheRead: turn.cacheRead, outputTokens: turn.outputTokens, repeatReads: turn.repeatReads };
   const ended = await call("turn.end", { session, origin, answer: turn.answer ?? "", finished: turn.finished ?? true, shown: false, touched: turn.files ?? [], edits: turn.edits ?? [], usage });
-  count([...(ended.kinds ?? []), ...(ended.withheld ?? [])]);
+  const kinds: string[] = [...(ended.kinds ?? []), ...(ended.withheld ?? [])].filter((kind) => !(turn.commandsPartial && kind === NEEDS_EVERY_COMMAND));
+  count(overall, kinds, ended.followed ?? []);
+  count((byMode[turn.stem ?? "unknown"] ??= {}), kinds, ended.followed ?? []);
 }
 const status = await call("status");
 await call("shutdown");
 rmSync(join(dir, ".."), { recursive: true, force: true });
 
-const records: Record<string, { turns: number; followed: number; state: string }> = status.usage?.kinds ?? {};
-const measured = Object.entries(status.usage?.notShown ?? {}).map(([kind, row]: [string, any]) => ({
-  kind,
-  turns: row.turns,
-  borneOut: row.followed ?? null,
-  rate: row.followed == null || !row.turns ? null : Math.round((row.followed / row.turns) * 100) / 100,
-  state: records[kind]?.state ?? "always shown",
-}));
-console.log(JSON.stringify({ turns: turns.length, learned: { fixes: status.fixes, answers: status.answers, lessons: status.lessons, usualCheckAreas: (status.habits ?? []).length }, kinds: measured.sort((a, b) => b.turns - a.turns), usualChecks: (status.habits ?? []).slice(0, 5) }, null, 1));
+const states: Record<string, { state: string }> = status.usage?.kinds ?? {};
+const rated = (tally: Tally) =>
+  Object.entries(tally)
+    .map(([kind, row]) => ({ kind, ...row, rate: Math.round((row.borneOut / row.turns) * 100) / 100, state: states[kind]?.state ?? "always shown" }))
+    .sort((a, b) => b.turns - a.turns);
+console.log(
+  JSON.stringify(
+    {
+      turns: turns.length,
+      learned: { fixes: status.fixes, answers: status.answers, lessons: status.lessons, usualCheckAreas: (status.habits ?? []).length },
+      kinds: rated(overall),
+      byMode: Object.fromEntries(Object.entries(byMode).map(([mode, tally]) => [mode, rated(tally)])),
+      usualChecks: (status.habits ?? []).slice(0, 8),
+    },
+    null,
+    1,
+  ),
+);

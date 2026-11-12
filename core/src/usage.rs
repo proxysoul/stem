@@ -7,8 +7,8 @@ const MAX_BYTES: u64 = 4_000_000;
 const KEEP_LINES: usize = 4_000;
 const FOLLOWABLE: &[&str] = &["familiar", "regress", "answer", "habits", "resume", "trail"];
 const UNNOTED: &str = "none";
-pub const EARNING: &[&str] = &["familiar", "regress", "answer", "habits"];
-const SHOWN_UNTIL_JUDGED: &[&str] = &["regress", "answer"];
+pub const EARNING: &[&str] = &["familiar", "regress", "answer", "habits", "resume"];
+const SHOWN_UNTIL_JUDGED: &[&str] = &["regress", "answer", "resume"];
 const PROVEN_MIN_TURNS: usize = 10;
 const PROVEN_MIN_RATE: f64 = 0.5;
 

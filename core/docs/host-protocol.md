@@ -55,7 +55,7 @@ Before the model sees a request. Put the returned `note` in front of the request
 - `task`: optional, the conversation's request as the app knows it. Stem uses it when a follow-up or an `engine` turn arrives in a conversation it has not seen before.
 - `note` is null when Stem has nothing useful. A short follow-up such as "continue" or "yeah do it" never brings back an old answer or fix.
 - `kinds`: which kinds of note are in `note`: `familiar`, `answer`, `regress`, `resume`, `lessons`, `trail`.
-- `withheld`: kinds Stem worked out for this turn and left out of `note`, because that kind has not earned being shown in this project. A kind earns it by being right: over at least 10 turns, the turn went on to do what the note said in at least half (see `followed` under `turn.end`), whether the note was shown or not. `familiar` and `habits` start withheld. `regress` and `answer` are shown until they have 10 turns on record, then have to hold the same rate. `lessons` at the start of a turn follow `familiar`. `resume`, `trail` and the notes tied to an opened file are always shown. `status` reports where each kind stands.
+- `withheld`: kinds Stem worked out for this turn and left out of `note`, because that kind has not earned being shown in this project. A kind earns it by being right: over at least 10 turns, the turn went on to do what the note said in at least half (see `followed` under `turn.end`), whether the note was shown or not. `familiar` and `habits` start withheld. `regress`, `answer` and `resume` are shown until they have 10 turns on record, then have to hold the same rate. `lessons` at the start of a turn follow `familiar`. `trail` and the notes tied to an opened file are always shown. Work that stopped is only offered back to the session it stopped in, and not within ten minutes of stopping, when the session still has it in view. `status` reports where each kind stands.
 - A short follow-up in the same session gets the task so far (`trail`): its request, the files it changed and how the last turn ended. Another session's follow-up gets nothing from it.
 - `answer`, when an earlier answer fits: `{"text", "request", "files", "sure"}`. `sure` is true only when the wording is nearly identical, so the app may show the answer before running the model. A match picked through `decide` has `sure: false`.
 - `familiarity`, when earlier work matches: `{"score", "priorSteps"}`. `priorSteps` is how many steps the last turn of this session's task took, or null.
@@ -76,7 +76,7 @@ Before a tool call runs. Apply what comes back.
   - `read` or `edit` of a file where an earlier fix has been undone: the fix, and the request it was for.
   - `edit` or `write` of a file that has feedback on an earlier fix: that feedback.
   - the first `edit` or `write` in an area of the project: that area's usual checks (below).
-- Usual checks: the commands earlier turns ran after changing files there, such as `cd packages/web && npm run typecheck` (9 of 21 turns). A command is offered once at least three turns used it and at least 30% of the turns in that area did.
+- Usual checks: the commands earlier turns ran after changing files there, such as `cd packages/web && npm run typecheck` (9 of 21 turns). A command is offered once at least three turns used it and at least 30% of the turns in that area did, and only if it ran at least twice as often after an edit as before one, which leaves out probes that run at any time.
 - Call names and arguments are Stem's `$` API: `sh {cmd}`, `read {path}`, `grep {pattern, path}`, `edit {path}`, `write {path}`, `test {filter}`.
 
 ### `tool.result`
@@ -111,7 +111,7 @@ When the model's reply is done.
   - `regress`: the earlier fix is back in the file at turn end.
   - `answer`: the turn changed no file and either finished in two steps or fewer, or its answer cites a file the earlier answer cited.
   - `habits`: one of the offered commands was run later in the turn.
-  - `resume`: the turn finished. `trail`: the turn finished with `repeatReads` 0.
+  - `resume`: the session wrote a file the stopped work had touched (or, when it had touched none, the turn finished). `trail`: the turn finished with `repeatReads` 0.
   - `lessons` and `known` have no such test.
 - An `engine` turn that continues a task is learned from like the user's own, except that it never stores an answer. A turn of any other origin, and an `engine` turn with no task, answer `{"skipped": ..., "usageStored": ...}`: nothing is learned, the usage is still stored.
 
@@ -196,6 +196,7 @@ One JSON object per line, oldest first. Only `session` and `prompt` are required
 ```
 
 - `files`: what the session wrote, in order of first write. `reads`: what it read. `commands`: what it ran, with `afterFirstWrite` true for those that came after its first write.
+- `commandsPartial: true` marks a turn whose commands could not all be recorded; it is left out of the usual-checks rate. `stem` (any label, such as `off` or `on`) splits the rates by that label.
 - Without `edits`, earlier fixes cannot be learned, so the undone-fix note never fires in the replay.
 
 ## Reference host

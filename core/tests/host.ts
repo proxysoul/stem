@@ -239,6 +239,25 @@ const hinted = await call("turn.start", { session: "tab-t1", prompt: "continue",
 check("a follow-up in a conversation Stem has not seen takes the app's task for it", /continues the task: Make the tax helper configurable per country/.test(hinted.result?.note ?? ""), hinted);
 await call("turn.end", { session: "tab-t1", answer: "", finished: true, edits: [], touched: [] });
 
+const probed = async (session: string, file: string) => {
+  await call("turn.start", { session, prompt: `rework the parser module for case ${session}`, origin: "user" });
+  await call("tool.result", { session, call: "sh", args: { cmd: "sysprobe --memory" }, result: { code: 0 } });
+  const first = await call("rule.check", { session, call: "edit", args: { path: file } });
+  await call("tool.result", { session, call: "sh", args: { cmd: "sysprobe --memory" }, result: { code: 0 } });
+  await call("tool.result", { session, call: "sh", args: { cmd: "make parser-check" }, result: { code: 0 } });
+  await call("turn.end", { session, answer: "done", finished: true, edits: [], touched: [file] });
+  return String(first.result?.note ?? "");
+};
+for (const session of ["tab-p1", "tab-p2", "tab-p3"]) await probed(session, "lib/parser/tokens.ts");
+const afterProbes = await probed("tab-p4", "lib/parser/tokens.ts");
+check("a command run as often before an edit as after it is not a usual check", afterProbes.includes("make parser-check") && !afterProbes.includes("sysprobe"), afterProbes);
+
+await call("turn.start", { session: "tab-u1", prompt: "migrate the billing exporter to the streaming writer", origin: "user" });
+await call("turn.end", { session: "tab-u1", answer: "", finished: false, edits: [], touched: ["src/price.ts"] });
+const otherConversation = await call("turn.start", { session: "tab-u2", prompt: "migrate the billing exporter to the streaming writer too", origin: "user" });
+check("work stopped in one conversation is not offered to another", !otherConversation.result?.kinds?.includes("resume") && !/stopped/i.test(otherConversation.result?.note ?? ""), otherConversation);
+await call("turn.end", { session: "tab-u2", answer: "", finished: true, edits: [], touched: [] });
+
 const bad = await call("nope");
 check("unknown methods return an error, not a crash", !!bad.error?.message, bad);
 

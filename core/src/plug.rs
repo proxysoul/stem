@@ -55,6 +55,7 @@ impl Link {
 struct Seen {
     edited: bool,
     checks: Vec<(String, Option<bool>)>,
+    before: Vec<String>,
     told: HashSet<String>,
     kinds: Vec<String>,
     withheld: Vec<String>,
@@ -157,6 +158,7 @@ impl Server {
                     match call {
                         "edit" | "write" => seen.edited = true,
                         "sh" if seen.edited && !command.is_empty() => seen.checks.push((command.to_string(), params["result"]["code"].as_i64().map(|c| c == 0))),
+                        "sh" if !command.is_empty() => seen.before.push(command.to_string()),
                         _ => {}
                     }
                 }
@@ -247,6 +249,7 @@ impl Server {
                     tests: strings(&params["tests"]).unwrap_or_default(),
                     usage: params["usage"].clone(),
                     checks: seen.checks,
+                    checks_before: seen.before,
                     kinds: seen.kinds,
                     withheld: seen.withheld,
                     acted: seen.acted,

@@ -25,6 +25,8 @@ const EVIDENCE_MIN: f64 = 1.0;
 const EVIDENCE_SHARE: f64 = 0.3;
 const NAMED_EVIDENCE_MIN: f64 = 0.5;
 const COMMON_WORD_RARITY: f64 = 0.5;
+const MAX_TRAIL_WORDS: usize = 1500;
+const MAX_TRAIL_FILES_PER_WORD: usize = 40;
 const FAMILIAR_WORDS_SHOWN: usize = 4;
 const FIXES_PER_REQUEST: usize = 12;
 const ANSWER_MAX_REQUEST: usize = 300;
@@ -37,6 +39,7 @@ fn fix_target(path: &str) -> bool {
 }
 const MAX_PROMPT_WORDS: usize = 4000;
 const RESUME_MAX_SECS: u64 = 24 * 3600;
+const RESUME_SAME_SESSION_MIN_SECS: u64 = 600;
 const FIXES_PER_TASK: usize = 40;
 const SUBSTANTIVE_WORDS: usize = 2;
 const TRAIL_FILES_MAX: usize = 10;
@@ -120,6 +123,10 @@ pub struct Resume {
     pub last_result: String,
     #[serde(default)]
     pub at: u64,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -221,6 +228,8 @@ pub struct Learn {
     pub noted_regress: Vec<(String, String, String)>,
     pub regress_told: HashSet<String>,
     pub acted: bool,
+    pub noted_resume: Vec<String>,
+    pub checks_before: Vec<String>,
 }
 
 pub fn applied(now: &str, before: &str, after: &str) -> bool {
@@ -381,7 +390,7 @@ impl Learn {
         let dir = root.join(".stem").join("learn");
         let enabled = std::env::var("STEM_LEARN").map(|v| v != "off" && v != "0").unwrap_or(true);
         let state: State = if enabled { std::fs::read_to_string(dir.join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default() } else { State::default() };
-        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new(), acted: false }
+        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new(), acted: false, noted_resume: Vec::new(), checks_before: Vec::new() }
     }
 
     fn lock(&self) -> Option<StateLock> {
@@ -457,6 +466,11 @@ impl Learn {
         }
         if call == "sh" && a["cmd"].as_str().is_some_and(crate::habits::changes_things) {
             self.acted = true;
+        }
+        if self.touched.is_empty() && call == "sh" {
+            if let Some(cmd) = a["cmd"].as_str() {
+                self.checks_before.push(cmd.to_string());
+            }
         }
         if !self.touched.is_empty() {
             let Ok(value) = result else { return };
@@ -773,6 +787,9 @@ impl Learn {
             return None;
         }
         let r = self.state.resume.clone()?;
+        if r.session.is_some() && (r.session != self.session || unix_now().saturating_sub(r.at) < RESUME_SAME_SESSION_MIN_SECS) {
+            return None;
+        }
         if r.at > 0 && unix_now().saturating_sub(r.at) > RESUME_MAX_SECS {
             let _lock = self.lock();
             self.reload();
@@ -788,6 +805,7 @@ impl Learn {
             return None;
         }
         self.events.push(("learn_used".into(), json!({"what": "resume"})));
+        self.noted_resume = r.files.iter().cloned().chain(r.edits.iter().map(|(f, _, _)| f.clone())).collect();
         let mut present: Vec<String> = Vec::new();
         let mut undone: Vec<String> = Vec::new();
         let mut moved: Vec<String> = Vec::new();
@@ -1267,6 +1285,8 @@ impl Learn {
             scratch: self.scratch.iter().filter(|p| Path::new(p).is_file()).cloned().collect(),
             last_result: self.last_result.chars().rev().take(RESUME_RESULT).collect::<Vec<_>>().into_iter().rev().collect(),
             at: unix_now(),
+            session: self.session.clone(),
+            files: self.touched.iter().filter(|t| learnable(t)).cloned().collect(),
         });
         let changed: Vec<String> = self.touched.iter().filter(|t| !is_test_file(t) && learnable(t)).cloned().collect();
         self.state.answers.retain(|a| a.request.chars().count() < ANSWER_MAX_REQUEST);
@@ -1326,7 +1346,7 @@ impl Learn {
         if on("habits") {
             let worked_on: Vec<String> = changed.iter().filter(|f| trail_target(f)).cloned().collect();
             if !worked_on.is_empty() {
-                crate::habits::learn(&mut self.state.habits, &worked_on, &self.checks_run, self.state.sessions);
+                crate::habits::learn(&mut self.state.habits, &worked_on, &self.checks_run, &self.checks_before, self.state.sessions);
             }
         }
         self.state.last_changed = changed.clone();
@@ -1344,6 +1364,21 @@ impl Learn {
                 for f in &targets {
                     *entry.entry((*f).clone()).or_default() += 1;
                 }
+                while entry.len() > MAX_TRAIL_FILES_PER_WORD {
+                    let stale = entry.keys().min_by_key(|f| self.state.changed_at.get(*f).copied().unwrap_or(0)).cloned();
+                    let Some(stale) = stale else { break };
+                    entry.remove(&stale);
+                }
+            }
+            if self.state.trails.len() > MAX_TRAIL_WORDS {
+                let newest = |files: &BTreeMap<String, u32>| files.keys().filter_map(|f| self.state.changed_at.get(f)).max().copied().unwrap_or(0);
+                let mut by_age: Vec<(u64, String)> = self.state.trails.iter().map(|(w, files)| (newest(files), w.clone())).collect();
+                by_age.sort();
+                let drop: HashSet<String> = by_age.into_iter().take(self.state.trails.len() - MAX_TRAIL_WORDS * 9 / 10).map(|(_, w)| w).collect();
+                self.state.trails.retain(|w, _| !drop.contains(w));
+                let kept: HashSet<&String> = self.state.trails.values().flat_map(|files| files.keys()).collect();
+                let live: HashSet<String> = self.state.changed_at.keys().filter(|f| kept.contains(f)).cloned().collect();
+                self.state.changed_at.retain(|f, _| live.contains(f));
             }
             for t in &self.tests_run {
                 *self.state.tested.entry(t.clone()).or_default() += 1;
