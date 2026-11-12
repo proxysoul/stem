@@ -185,6 +185,19 @@ On 141 real requests from that project, asked after Stem had seen 398 earlier on
 
 Two days of real use in that project, with every note withheld, is why kinds have to earn being shown: the usual checks were borne out in 12 of 17 turns, the familiar-files note in 4 of 27.
 
+## Replaying recorded turns
+
+`tools/replay.ts` feeds turns an app recorded earlier through `stem host`, in order, into a fresh store on a throwaway clone of the project, and prints how often each kind of note was borne out. Nothing reaches a model and the project is not touched, so an app can learn where each kind stands before any note is shown: `bun tools/replay.ts <project> <turns.jsonl> [path to stem]`.
+
+One JSON object per line, oldest first. Only `session` and `prompt` are required:
+
+```json
+{"session": "tab-42", "origin": "user", "prompt": "the cart total is wrong", "task": "the cart total is wrong", "files": ["src/price.ts"], "reads": ["src/price.ts", "src/cart.ts"], "commands": [{"cmd": "npm test", "code": 0, "afterFirstWrite": true}], "edits": [{"file": "src/price.ts", "before": "...", "after": "..."}], "answer": "Fixed total().", "finished": true, "steps": 9, "cost": 0.42, "inputTokens": 81000, "cacheRead": 64000, "outputTokens": 2300, "repeatReads": 3}
+```
+
+- `files`: what the session wrote, in order of first write. `reads`: what it read. `commands`: what it ran, with `afterFirstWrite` true for those that came after its first write.
+- Without `edits`, earlier fixes cannot be learned, so the undone-fix note never fires in the replay.
+
 ## Reference host
 
 `tests/host.ts` drives `stem host` end to end on a fresh repo: `bun tests/host.ts [path to stem]`. `tests/smoke.sh` runs it too. It checks every method, a `decide` that is accepted, declined and never answered, follow-ups and the task so far, the app's own continuations, messages from other tabs, rules, notes on opening a file, usual checks, known failures, import, usage against an independent recount, an app that reports its own edits, and kinds being withheld until they earn being shown.
