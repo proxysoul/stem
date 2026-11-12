@@ -76,7 +76,7 @@ Before a tool call runs. Apply what comes back.
   - `read` or `edit` of a file where an earlier fix has been undone: the fix, and the request it was for.
   - `edit` or `write` of a file that has feedback on an earlier fix: that feedback.
   - the first `edit` or `write` in an area of the project: that area's usual checks (below).
-- Usual checks: the commands earlier turns ran after changing files there, such as `cd packages/web && npm run typecheck` (9 of 21 turns). A command is offered once at least three turns used it and at least 30% of the turns in that area did, and only if it ran at least twice as often after an edit as before one, which leaves out probes that run at any time.
+- Usual checks: the commands earlier turns ran after changing files there, such as `cd packages/web && npm run typecheck` (9 of 21 turns). A command is offered once at least three turns used it and at least 30% of the recent turns in that area did (older turns fade, so a busy area keeps up with how it is checked now), and only if it ran at least twice as often after an edit as before one, which leaves out probes that run at any time.
 - Call names and arguments are Stem's `$` API: `sh {cmd}`, `read {path}`, `grep {pattern, path}`, `edit {path}`, `write {path}`, `test {filter}`.
 
 ### `tool.result`

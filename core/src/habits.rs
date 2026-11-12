@@ -75,6 +75,7 @@ const MAX_CHECKS: usize = 12;
 const HABIT_MIN_RUNS: u32 = 3;
 const HABIT_MIN_SHARE: f64 = 0.3;
 const HABITS_SHOWN: usize = 3;
+const FADE: f64 = 0.97;
 const PLACEHOLDER: &str = "<file>";
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -84,11 +85,15 @@ pub struct Check {
     pub last: u64,
     #[serde(default)]
     pub before: u32,
+    #[serde(default)]
+    pub lately: f64,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Area {
     pub turns: u32,
+    #[serde(default)]
+    pub lately: f64,
     pub checks: BTreeMap<String, Check>,
 }
 
@@ -191,10 +196,21 @@ pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<boo
     for name in areas {
         let entry = habits.entry(name).or_default();
         entry.checks.retain(|cmd, _| still_a_command(cmd));
+        if entry.lately == 0.0 && entry.turns > 0 {
+            entry.lately = f64::from(entry.turns);
+            for c in entry.checks.values_mut() {
+                c.lately = f64::from(c.runs);
+            }
+        }
         entry.turns += 1;
+        entry.lately = entry.lately * FADE + 1.0;
+        for c in entry.checks.values_mut() {
+            c.lately *= FADE;
+        }
         for (check, passed) in &checks {
             let c = entry.checks.entry(check.clone()).or_default();
             c.runs += 1;
+            c.lately += 1.0;
             c.passed += u32::from(*passed);
             c.last = session;
         }
@@ -204,7 +220,7 @@ pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<boo
             }
         }
         while entry.checks.len() > MAX_CHECKS {
-            let Some(weakest) = entry.checks.iter().min_by_key(|(_, c)| (c.runs, c.last)).map(|(k, _)| k.clone()) else { break };
+            let Some(weakest) = entry.checks.iter().min_by(|a, b| a.1.lately.partial_cmp(&b.1.lately).unwrap_or(std::cmp::Ordering::Equal).then(a.1.last.cmp(&b.1.last))).map(|(k, _)| k.clone()) else { break };
             entry.checks.remove(&weakest);
         }
     }
@@ -214,8 +230,12 @@ pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<boo
     }
 }
 
+fn share(area: &Area, check: &Check) -> f64 {
+    if area.lately > 0.0 { check.lately / area.lately } else { f64::from(check.runs) / f64::from(area.turns.max(1)) }
+}
+
 pub fn usual(area: &Area) -> Vec<(&String, &Check)> {
-    let mut found: Vec<(&String, &Check)> = area.checks.iter().filter(|(_, c)| c.runs >= HABIT_MIN_RUNS && c.before * 2 <= c.runs && f64::from(c.runs) / f64::from(area.turns.max(1)) >= HABIT_MIN_SHARE).collect();
+    let mut found: Vec<(&String, &Check)> = area.checks.iter().filter(|(_, c)| c.runs >= HABIT_MIN_RUNS && c.before * 2 <= c.runs && share(area, c) >= HABIT_MIN_SHARE).collect();
     found.sort_by(|a, b| b.1.runs.cmp(&a.1.runs).then(b.1.last.cmp(&a.1.last)));
     found.truncate(HABITS_SHOWN);
     found
