@@ -7,6 +7,68 @@ const LOOKING: &[&str] = &[
     "test", "[", "export", "source", "true", "false", "diff", "tree", "less", "more", "awk", "sort", "uniq", "cut", "tr", "xargs", "env", "set", "git", "gh", "chmod", "ln", "tar", "unzip", "jq", "tee", "time", "nohup", "wait", "read", "exit", "return",
 ];
 const INLINE_FLAGS: &[&str] = &["-e", "-c", "-p", "--eval", "--print"];
+const SHELL_WORDS: &[&str] = &["do", "done", "then", "else", "elif", "fi", "esac", "case", "in", "function", "{", "}", "(", ")"];
+const READS_ONLY: &[&str] = &[
+    "ls", "cat", "sed", "grep", "rg", "head", "tail", "wc", "find", "echo", "cd", "pwd", "stat", "date", "sleep", "ps", "pgrep", "lsof", "which", "file", "du", "df", "printf", "test", "[", "true", "false", "diff", "tree", "less", "more", "awk", "sort", "uniq",
+    "cut", "tr", "jq", "env", "time", "wait", "read", "for", "while", "if", "export", "set",
+];
+const GIT_READS: &[&str] = &["grep", "log", "show", "diff", "status", "blame", "ls-files", "rev-parse", "check-ignore", "describe", "count-objects", "ls-remote", "cat-file", "shortlog", "reflog"];
+const GH_READS: &[&str] = &["view", "list", "status", "diff", "checks", "watch"];
+
+fn parts_of(cmd: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c == ';' || c == '\n' || (c == '&' && chars.get(i + 1) == Some(&'&')) || (c == '|' && chars.get(i + 1) == Some(&'|')) => {
+                parts.push(std::mem::take(&mut cur));
+                i += if c == '&' || c == '|' { 2 } else { 1 };
+                continue;
+            }
+            None => {}
+        }
+        cur.push(c);
+        i += 1;
+    }
+    parts.push(cur);
+    if quote.is_some() {
+        return Vec::new();
+    }
+    parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+}
+
+fn first_words(part: &str) -> Vec<&str> {
+    let mut words: Vec<&str> = part.split_whitespace().collect();
+    while words.first().is_some_and(|w| w.contains('=') && !w.starts_with('-')) {
+        words.remove(0);
+    }
+    if words.first() == Some(&"timeout") && words.len() > 2 {
+        words.drain(..2);
+    }
+    words
+}
+
+pub fn changes_things(cmd: &str) -> bool {
+    let parts = parts_of(cmd);
+    parts.is_empty()
+        || parts.iter().any(|part| {
+            let words = first_words(cut_at(part, &[" | "]));
+            let wrote = part.contains(" > ") || part.contains(" >> ") || words.contains(&"-i");
+            match words.first().copied() {
+                None => false,
+                Some("git") => wrote || !words.get(1).is_some_and(|sub| GIT_READS.contains(sub)),
+                Some("gh") => wrote || !words.get(2).is_some_and(|verb| GH_READS.contains(verb)),
+                Some(first) => wrote || !(READS_ONLY.contains(&first) || SHELL_WORDS.contains(&first)),
+            }
+        })
+}
 const MAX_COMMAND: usize = 120;
 const MAX_AREAS: usize = 80;
 const MAX_CHECKS: usize = 12;
@@ -42,14 +104,16 @@ fn cut_at<'a>(text: &'a str, marks: &[&str]) -> &'a str {
 
 fn one_check(part: &str, edited: &[String]) -> Option<String> {
     let part = cut_at(part, &[" | ", " 2>", " >", " <"]).trim();
-    let mut words: Vec<&str> = part.split_whitespace().collect();
-    while words.first().is_some_and(|w| w.contains('=') && !w.starts_with('-')) {
-        words.remove(0);
-    }
-    if words.first() == Some(&"timeout") && words.len() > 2 {
+    let mut words = first_words(part);
+    if words.first() == Some(&"bun") && words.get(1) == Some(&"x") {
         words.drain(..2);
+        words.insert(0, "bunx");
     }
     let first = words.first()?;
+    let command_like = first.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c));
+    if !command_like || SHELL_WORDS.contains(first) {
+        return None;
+    }
     let scratch = |w: &str| w.starts_with("/tmp") || w.starts_with("/private/") || w.starts_with('~') || w.starts_with('$') || w.contains("/tmp/");
     if LOOKING.contains(first) || words.iter().any(|w| INLINE_FLAGS.contains(w) || scratch(w)) {
         return None;
@@ -69,14 +133,22 @@ fn one_check(part: &str, edited: &[String]) -> Option<String> {
     (command.len() <= MAX_COMMAND && !command.contains(['`', '\n'])).then_some(command)
 }
 
+fn still_a_command(check: &str) -> bool {
+    let body = check.split_once(" && ").filter(|(lead, _)| lead.starts_with("cd ")).map(|(_, rest)| rest).unwrap_or(check);
+    let words: Vec<&str> = body.split_whitespace().collect();
+    let Some(first) = words.first() else { return false };
+    let spelled = first.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c));
+    spelled && !SHELL_WORDS.contains(first) && !LOOKING.contains(first) && !(*first == "bun" && words.get(1) == Some(&"x"))
+}
+
 pub fn checks_in(cmd: &str, edited: &[String]) -> Vec<String> {
     if cmd.contains("${") || cmd.contains("$(") {
         return Vec::new();
     }
     let mut out: Vec<String> = Vec::new();
     let mut place: Option<String> = None;
-    for part in cmd.split("&&").flat_map(|p| p.split(';')) {
-        let part = part.trim();
+    for part in parts_of(cmd) {
+        let part = part.as_str();
         if let Some(dir) = part.strip_prefix("cd ") {
             place = Some(dir.trim().to_string()).filter(|d| !d.starts_with('/') && !d.starts_with('~') && !d.starts_with('$'));
             continue;
@@ -108,6 +180,7 @@ pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<boo
     }
     for name in areas {
         let entry = habits.entry(name).or_default();
+        entry.checks.retain(|cmd, _| still_a_command(cmd));
         entry.turns += 1;
         for (check, passed) in &checks {
             let c = entry.checks.entry(check.clone()).or_default();

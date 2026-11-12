@@ -57,6 +57,8 @@ struct Seen {
     checks: Vec<(String, Option<bool>)>,
     told: HashSet<String>,
     kinds: Vec<String>,
+    withheld: Vec<String>,
+    acted: bool,
     offered: Vec<String>,
     undone_told: HashSet<String>,
     noted_regress: Vec<(String, String, String)>,
@@ -68,6 +70,12 @@ impl Seen {
             self.kinds.push(kind.to_string());
         }
     }
+
+    fn held_back(&mut self, kind: &str) {
+        if !self.withheld.iter().any(|k| k == kind) {
+            self.withheld.push(kind.to_string());
+        }
+    }
 }
 
 struct Server {
@@ -75,6 +83,7 @@ struct Server {
     link: Rc<RefCell<Link>>,
     decide_ms: Option<u64>,
     reports_edits: bool,
+    show_all: bool,
     seen: HashMap<String, Seen>,
 }
 
@@ -106,6 +115,7 @@ impl Server {
                 let offered = strings(&params["capabilities"]).unwrap_or_default();
                 self.decide_ms = offered.iter().any(|c| c == "decide").then(|| params["decideMs"].as_u64().unwrap_or(DEFAULT_DECIDE_MS));
                 self.reports_edits = offered.iter().any(|c| c == "edits");
+                self.show_all = params["show"].as_str() == Some("all") || crate::hook::shows_everything();
                 Ok(json!({"protocol": PROTOCOL, "stem": env!("CARGO_PKG_VERSION"), "root": self.root, "methods": METHODS, "callbacks": if self.decide_ms.is_some() { json!(["decide"]) } else { json!([]) }}))
             }
             "turn.start" => {
@@ -116,19 +126,19 @@ impl Server {
                 }
                 crate::events::ensure_ignored(&self.root.join(".stem"));
                 if origin(params) != ORIGIN_USER {
-                    let continues = origin(params) == ORIGIN_ENGINE && continue_task(&self.root, &session, self.reports_edits);
+                    let continues = origin(params) == ORIGIN_ENGINE && continue_task(&self.root, &session, self.reports_edits, params["task"].as_str());
                     if continues {
                         self.seen.insert(session.clone(), Seen::default());
                         return Ok(json!({"note": null, "kinds": [], "continues": true}));
                     }
                     return Ok(json!({"note": null, "kinds": [], "skipped": "only the user's own requests start or steer a task"}));
                 }
-                let begin = Begin { decide: self.decider(), without_snapshot: self.reports_edits, task: params["task"].as_str().filter(|t| !t.trim().is_empty()) };
+                let begin = Begin { decide: self.decider(), without_snapshot: self.reports_edits, task: params["task"].as_str().filter(|t| !t.trim().is_empty()), show_all: self.show_all };
                 let started = begin_with(&self.root, &session, prompt, begin);
                 let mut seen = Seen::default();
                 seen.undone_told.extend(started.noted_regress.iter().map(|(file, _, _)| file.clone()));
                 self.seen.insert(session.clone(), seen);
-                let mut result = json!({"note": started.note.map(|n| cap(&n)), "kinds": started.kinds});
+                let mut result = json!({"note": started.note.map(|n| cap(&n)), "kinds": started.kinds, "withheld": started.withheld});
                 if let Some(answer) = started.answer {
                     result["answer"] = answer;
                 }
@@ -141,6 +151,9 @@ impl Server {
                 let call = params["call"].as_str().unwrap_or("");
                 let command = params["args"]["cmd"].as_str().unwrap_or("");
                 if let Some(seen) = params["session"].as_str().and_then(|s| self.seen.get_mut(s)) {
+                    if call == "sh" && crate::habits::changes_things(command) {
+                        seen.acted = true;
+                    }
                     match call {
                         "edit" | "write" => seen.edited = true,
                         "sh" if seen.edited && !command.is_empty() => seen.checks.push((command.to_string(), params["result"]["code"].as_i64().map(|c| c == 0))),
@@ -174,6 +187,7 @@ impl Server {
                 let call = params["call"].as_str().ok_or("missing call")?;
                 let (outcome, rule) = Rules::load(&self.root).apply(call, &params["args"]);
                 let mut learned: Vec<String> = Vec::new();
+                let show_all = self.show_all;
                 if let (Outcome::Run { name, args, .. }, Some(seen)) = (&outcome, params["session"].as_str().and_then(|s| self.seen.get_mut(s))) {
                     if let Some(path) = args["path"].as_str().filter(|_| matches!(name.as_str(), "read" | "edit" | "write")) {
                         let mut learn = Learn::open(&self.root);
@@ -194,9 +208,13 @@ impl Server {
                             seen.edited = true;
                             learn.habits_told = std::mem::take(&mut seen.told);
                             if let Some(note) = learn.habits_for(path) {
-                                seen.fired("habits");
                                 seen.offered.extend(learn.habits_offered.iter().cloned());
-                                learned.push(note);
+                                if show_all || crate::usage::shows(&crate::usage::records(&self.root), "habits") {
+                                    seen.fired("habits");
+                                    learned.push(note);
+                                } else {
+                                    seen.held_back("habits");
+                                }
                             }
                             seen.told = learn.habits_told;
                         }
@@ -230,6 +248,8 @@ impl Server {
                     usage: params["usage"].clone(),
                     checks: seen.checks,
                     kinds: seen.kinds,
+                    withheld: seen.withheld,
+                    acted: seen.acted,
                     offered_checks: seen.offered,
                     noted_regress: seen.noted_regress,
                     shown: params["shown"].as_bool(),
@@ -267,7 +287,7 @@ pub fn run(root: &Path) -> i32 {
         }
     });
     let link = Rc::new(RefCell::new(Link { lines: rx, queued: VecDeque::new(), next: 0 }));
-    let mut server = Server { root: root.to_path_buf(), link: link.clone(), decide_ms: None, reports_edits: false, seen: HashMap::new() };
+    let mut server = Server { root: root.to_path_buf(), link: link.clone(), decide_ms: None, reports_edits: false, show_all: false, seen: HashMap::new() };
     loop {
         let Some(line) = link.borrow_mut().take() else { return 0 };
         if line.trim().is_empty() {

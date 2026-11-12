@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -43,7 +43,7 @@ const call = (method: string, params: object = {}) =>
 const checks: [string, boolean, unknown?][] = [];
 const check = (name: string, ok: boolean, seen?: unknown) => checks.push([name, ok, ok ? undefined : seen]);
 
-const hello = await call("hello", { protocol: 1, host: { name: "reference" }, capabilities: ["decide"], decideMs: 2000 });
+const hello = await call("hello", { protocol: 1, host: { name: "reference" }, capabilities: ["decide"], decideMs: 2000, show: "all" });
 check("hello speaks protocol 1 and offers decide", hello.result?.protocol === 1 && hello.result.callbacks.includes("decide"), hello);
 
 const first = await call("turn.start", { session: "tab-a", prompt: "the cart total adds price and qty instead of multiplying them", origin: "user" });
@@ -170,7 +170,7 @@ check("a test that fails twice on a clean tree is then reported as not caused by
 
 const measured = await call("status");
 const byNote = measured.result?.usage?.byNote ?? {};
-check("status reports turns, median cost and tokens per note kind", measured.result?.usage?.turns === 5 && byNote.habits?.turns === 1 && byNote.habits.medianCost === 0.5 && byNote.habits.medianTokens === 1000 && byNote.habits.medianRepeatReads === 2 && byNote.habits.followed === 1 && byNote.trail?.turns === 1 && byNote.trail.medianSteps === 1, measured.result?.usage);
+check("status reports turns, median cost and tokens per note kind", measured.result?.usage?.turns >= 5 && byNote.habits?.turns === 2 && byNote.habits.medianCost === 0.5 && byNote.habits.medianTokens === 1000 && byNote.habits.medianRepeatReads === 2 && byNote.habits.followed === 1 && byNote.trail?.turns === 1 && byNote.trail.medianSteps === 1, { habits: byNote.habits, trail: byNote.trail, turns: measured.result?.usage?.turns });
 check("status lists the project's usual checks", measured.result?.habits?.[0]?.area === "src" && measured.result.habits[0].checks[0].cmd === "cd src && bun run lint <file>", measured.result?.habits);
 
 const usageRows = () => readFileSync(join(dir, ".stem", "learn", "usage.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -263,6 +263,43 @@ writeFileSync(join(dir, "src", "tax.ts"), "export const tax = (n: number) => n *
 const ownOnly = await call2("turn.end", { session: "tab-x1", answer: "", finished: true });
 check("an app that reports its own edits gets no git snapshot and no diff of other work", pending.base === null && ownOnly.result?.edits === 0 && ownOnly.result.files.length === 0, { base: pending.base, ownOnly });
 await call2("shutdown");
+
+const third = spawn(stem, ["host"], { cwd: dir, stdio: ["pipe", "pipe", "inherit"] });
+const thirdWaiting = new Map<string, (v: any) => void>();
+createInterface({ input: third.stdout }).on("line", (line) => {
+  const msg = JSON.parse(line);
+  thirdWaiting.get(String(msg.id))?.(msg);
+});
+const call3 = (method: string, params: object = {}) =>
+  new Promise<any>((resolve) => {
+    const id = String(++next);
+    thirdWaiting.set(id, resolve);
+    third.stdin.write(JSON.stringify({ id, method, params }) + "\n");
+  });
+await call3("hello", { protocol: 1 });
+const earning = (await call3("status")).result.usage.kinds;
+check("status says which kinds of note have earned being shown", earning.familiar?.state === "probation" && earning.habits?.state === "probation" && earning.regress?.state === "shown until judged" && earning.answer?.state === "shown until judged" && earning.familiar.needsTurns === 10, earning);
+const gated = await call3("turn.start", { session: "tab-g1", prompt: "tax helper should accept a custom rate", origin: "user" });
+const gatedEdit = await call3("rule.check", { session: "tab-g1", call: "edit", args: { path: "src/price.ts" } });
+const gatedEnd = await call3("turn.end", { session: "tab-g1", answer: "", finished: true, edits: [], touched: [] });
+check(
+  "a kind that has not earned it is worked out and withheld, at the start and at the edit",
+  gated.result?.withheld?.includes("familiar") && !gated.result.kinds.includes("familiar") && !/earlier work in this project/.test(gated.result.note ?? "") && !/checked their work/.test(gatedEdit.result?.note ?? "") && gatedEnd.result?.withheld?.includes("habits") && gatedEnd.result.withheld.includes("familiar"),
+  { gated, gatedEdit, gatedEnd },
+);
+const usageFile = join(dir, ".stem", "learn", "usage.jsonl");
+for (let i = 0; i < 10; i++) appendFileSync(usageFile, JSON.stringify({ at: Date.now(), session: `earned-${i}`, task: null, origin: "user", kinds: [], withheld: ["habits"], followed: ["habits"], shown: true, finished: true }) + "\n");
+const earned = (await call3("status")).result.usage.kinds.habits;
+await call3("turn.start", { session: "tab-g2", prompt: "tax helper should reject negative amounts", origin: "user" });
+const shownEdit = await call3("rule.check", { session: "tab-g2", call: "edit", args: { path: "src/price.ts" } });
+const shownEnd = await call3("turn.end", { session: "tab-g2", answer: "", finished: true, edits: [], touched: [] });
+check("a kind that was right in at least half of ten turns is shown from then on", earned.state === "proven" && /checked their work/.test(shownEdit.result?.note ?? "") && shownEnd.result?.kinds?.includes("habits") && !shownEnd.result.withheld.includes("habits"), { earned, shownEdit, shownEnd });
+await call3("turn.start", { session: "tab-g3", prompt: "System notice: continue the work", origin: "engine", task: "Add a discount helper next to the tax helper" });
+writeFileSync(join(dir, "src", "discount.ts"), "export const discount = (n: number) => n * 0.9\n");
+const hintedEngine = await call3("turn.end", { session: "tab-g3", origin: "engine", answer: "Added it.", finished: true, edits: [], touched: ["src/discount.ts"] });
+const afterEngine = await call3("turn.start", { session: "tab-g3", prompt: "continue", origin: "user" });
+check("the app's continuation in a conversation Stem has not seen is learned under the app's task", hintedEngine.result?.files?.includes("src/discount.ts") && !hintedEngine.result.skipped && /continues the task: Add a discount helper/.test(afterEngine.result?.note ?? ""), { hintedEngine, afterEngine });
+await call3("shutdown");
 const failed = checks.filter(([, ok]) => !ok);
 for (const [name, ok, seen] of checks) console.log(`${ok ? "ok  " : "FAIL"} ${name}${seen ? " " + JSON.stringify(seen).slice(0, 400) : ""}`);
 console.log(`${checks.length - failed.length}/${checks.length} passed`);

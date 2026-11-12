@@ -94,6 +94,8 @@ pub struct Reported {
     pub usage: Value,
     pub checks: Vec<(String, Option<bool>)>,
     pub kinds: Vec<String>,
+    pub withheld: Vec<String>,
+    pub acted: bool,
     pub offered_checks: Vec<String>,
     pub noted_regress: Vec<(String, String, String)>,
     pub shown: Option<bool>,
@@ -104,6 +106,7 @@ pub struct Reported {
 pub struct Started {
     pub note: Option<String>,
     pub kinds: Vec<String>,
+    pub withheld: Vec<String>,
     pub answer: Option<Value>,
     pub familiarity: Option<Value>,
     pub noted_regress: Vec<(String, String, String)>,
@@ -114,6 +117,11 @@ pub struct Begin<'a> {
     pub decide: Option<crate::learn::Decider>,
     pub without_snapshot: bool,
     pub task: Option<&'a str>,
+    pub show_all: bool,
+}
+
+pub fn shows_everything() -> bool {
+    std::env::var("STEM_SHOW").is_ok_and(|v| v == "all")
 }
 
 const ORIGIN_USER: &str = "user";
@@ -145,7 +153,7 @@ fn fix_triples(list: &Value) -> Vec<(String, String, String)> {
 pub fn usage_only(root: &Path, session: &str, origin: &str, finished: bool, shown: bool, usage: &Value) -> bool {
     let mut learn = Learn::open(root);
     learn.session = Some(session.to_string());
-    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], followed: &[], shown, finished, usage })
+    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], withheld: &[], followed: &[], shown, finished, usage })
 }
 
 pub fn end(root: &Path, session: &str, answer: &str, finished: bool) -> Value {
@@ -180,26 +188,34 @@ pub fn end_with(root: &Path, session: &str, answer: &str, finished: bool, report
             kinds.push(kind.clone());
         }
     }
-    let has = |kind: &str| kinds.iter().any(|k| k == kind);
+    let mut withheld: Vec<String> = p["withheld"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string)).collect();
+    for kind in &reported.withheld {
+        if !withheld.contains(kind) && !kinds.contains(kind) {
+            withheld.push(kind.clone());
+        }
+    }
+    let has = |kind: &str| kinds.iter().chain(&withheld).any(|k| k == kind);
     let mut regress = fix_triples(&p["regress"]);
     regress.extend(reported.noted_regress.iter().cloned());
     let reapplied = !regress.is_empty() && regress.iter().all(|(file, before, after)| std::fs::read_to_string(root.join(file)).is_ok_and(|now| crate::learn::applied(&now, before, after)));
     let wrote_familiar = p["familiar"].as_array().into_iter().flatten().filter_map(Value::as_str).any(|f| touched.iter().any(|t| t == f));
     let ran_usual = reported.checks.iter().any(|(cmd, _)| crate::habits::checks_in(cmd, &touched).iter().any(|c| reported.offered_checks.contains(c)));
-    let answered_directly = finished && touched.is_empty() && reported.usage["steps"].as_u64().is_some_and(|s| s <= ANSWER_FOLLOWED_STEPS);
+    let cites_same = p["answered"].as_array().into_iter().flatten().filter_map(Value::as_str).any(|f| answer.contains(f));
+    let answered_directly = finished && touched.is_empty() && (cites_same || reported.usage["steps"].as_u64().is_some_and(|s| s <= ANSWER_FOLLOWED_STEPS));
     let reread_nothing = finished && reported.usage["repeatReads"].as_u64() == Some(0);
     let outcomes = [("familiar", wrote_familiar), ("regress", reapplied), ("habits", ran_usual), ("answer", answered_directly), ("resume", finished), ("trail", reread_nothing)];
     let followed: Vec<String> = outcomes.iter().filter(|(kind, did)| *did && has(kind)).map(|(kind, _)| kind.to_string()).collect();
-    let mut summary = json!({"request": prompt.chars().take(120).collect::<String>(), "edits": edits.len(), "files": touched, "kinds": kinds, "followed": followed});
+    let mut summary = json!({"request": prompt.chars().take(120).collect::<String>(), "edits": edits.len(), "files": touched, "kinds": kinds, "withheld": withheld, "followed": followed});
     let mut learn = Learn::open(root);
     learn.session = Some(session.to_string());
     learn.continues = p["continues"].as_bool().unwrap_or(false);
     learn.task_hint = p["task"].as_str().map(str::to_string);
     learn.ran_tests(&reported.tests);
     learn.checks_run = reported.checks;
+    learn.acted = reported.acted || reported.origin.as_deref().is_some_and(|o| o != ORIGIN_USER);
     learn.external(prompt, answer, edits, touched, finished, reported.usage["steps"].as_u64().unwrap_or(0) as usize);
     let origin = reported.origin.as_deref().unwrap_or(ORIGIN_USER);
-    let turn = crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &kinds, followed: &followed, shown: reported.shown.unwrap_or(true), finished, usage: &reported.usage };
+    let turn = crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &kinds, withheld: &withheld, followed: &followed, shown: reported.shown.unwrap_or(true), finished, usage: &reported.usage };
     summary["usageStored"] = json!(crate::usage::record(root, &turn));
     summary
 }
@@ -208,15 +224,16 @@ pub fn begin(root: &Path, session: &str, prompt: &str) -> Option<String> {
     begin_with(root, session, prompt, Begin::default()).note
 }
 
-pub fn continue_task(root: &Path, session: &str, without_snapshot: bool) -> bool {
+pub fn continue_task(root: &Path, session: &str, without_snapshot: bool, hint: Option<&str>) -> bool {
     let mut learn = Learn::open(root);
     learn.session = Some(session.to_string());
-    let Some(task) = learn.current_task() else { return false };
+    let known = learn.current_task();
+    let Some(task) = known.clone().or_else(|| hint.map(str::to_string).filter(|h| !h.trim().is_empty())) else { return false };
     if read_pending(root, session).is_some() {
         end(root, session, "", false);
     }
     let (base, others) = working_tree(root, without_snapshot);
-    write_pending(root, session, &json!({"prompt": task, "continues": true, "base": base, "untracked": others, "at": now(), "kinds": []}));
+    write_pending(root, session, &json!({"prompt": task, "continues": known.is_some(), "task": hint, "base": base, "untracked": others, "at": now(), "kinds": []}));
     true
 }
 
@@ -242,17 +259,22 @@ pub fn begin_with(root: &Path, session: &str, prompt: &str, options: Begin) -> S
     learn.decide = options.decide;
     learn.session = Some(session.to_string());
     learn.task_hint = options.task.map(str::to_string);
-    let note = learn.brief(prompt);
-    let kinds = learn.note_kinds();
+    let records = crate::usage::records(root);
+    let show_all = options.show_all || shows_everything();
+    let (shown, held): (Vec<_>, Vec<_>) = learn.brief(prompt).into_iter().partition(|(kind, _)| show_all || crate::usage::shows(&records, kind));
+    let note = (!shown.is_empty()).then(|| shown.iter().map(|(_, text)| text.as_str()).collect::<Vec<_>>().join("\n"));
+    let kinds: Vec<String> = shown.iter().map(|(kind, _)| kind.to_string()).collect();
+    let withheld: Vec<String> = held.iter().map(|(kind, _)| kind.to_string()).collect();
+    let answer_shown = kinds.iter().any(|k| k == "answer");
     let (base, others) = working_tree(root, options.without_snapshot);
     write_pending(
         root,
         session,
-        &json!({"prompt": prompt, "base": base, "untracked": others, "at": now(), "note": note, "kinds": kinds, "familiar": learn.noted_familiar, "regress": learn.noted_regress, "task": options.task}),
+        &json!({"prompt": prompt, "base": base, "untracked": others, "at": now(), "note": note, "kinds": kinds, "withheld": withheld, "familiar": learn.noted_familiar, "regress": learn.noted_regress, "answered": learn.offered.as_ref().map(|(a, _)| a.files.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>()), "task": options.task}),
     );
-    let answer = learn.offered.as_ref().map(|(a, sure)| json!({"text": a.answer, "request": a.request, "files": a.files.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(), "sure": sure}));
+    let answer = learn.offered.as_ref().filter(|_| answer_shown).map(|(a, sure)| json!({"text": a.answer, "request": a.request, "files": a.files.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(), "sure": sure}));
     let familiarity = learn.familiarity.map(|score| json!({"score": (score * 100.0).round() / 100.0, "priorSteps": learn.prior_steps()}));
-    Started { note, kinds, answer, familiarity, noted_regress: learn.noted_regress.clone() }
+    Started { note, kinds, withheld, answer, familiarity, noted_regress: learn.noted_regress.clone() }
 }
 
 fn log(root: &Path, line: &str) {

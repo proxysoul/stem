@@ -24,6 +24,10 @@ const RARITY_MIN_PROMPTS: u64 = 20;
 const EVIDENCE_MIN: f64 = 1.0;
 const EVIDENCE_SHARE: f64 = 0.3;
 const NAMED_EVIDENCE_MIN: f64 = 0.5;
+const COMMON_WORD_RARITY: f64 = 0.5;
+const FAMILIAR_WORDS_SHOWN: usize = 4;
+const FIXES_PER_REQUEST: usize = 12;
+const ANSWER_MAX_REQUEST: usize = 300;
 const ANSWER_MIN_WEIGHT: f64 = 2.0;
 const PROSE: &[&str] = &["md", "mdx", "txt", "rst", "adoc", "org"];
 
@@ -216,6 +220,7 @@ pub struct Learn {
     pub noted_familiar: Vec<String>,
     pub noted_regress: Vec<(String, String, String)>,
     pub regress_told: HashSet<String>,
+    pub acted: bool,
 }
 
 pub fn applied(now: &str, before: &str, after: &str) -> bool {
@@ -376,7 +381,7 @@ impl Learn {
         let dir = root.join(".stem").join("learn");
         let enabled = std::env::var("STEM_LEARN").map(|v| v != "off" && v != "0").unwrap_or(true);
         let state: State = if enabled { std::fs::read_to_string(dir.join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default() } else { State::default() };
-        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new() }
+        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new(), acted: false }
     }
 
     fn lock(&self) -> Option<StateLock> {
@@ -449,6 +454,9 @@ impl Learn {
                 self.touched.insert(p);
             }
             _ => {}
+        }
+        if call == "sh" && a["cmd"].as_str().is_some_and(crate::habits::changes_things) {
+            self.acted = true;
         }
         if !self.touched.is_empty() {
             let Ok(value) = result else { return };
@@ -975,7 +983,7 @@ impl Learn {
                 let age = self.state.sessions.saturating_sub(*self.state.changed_at.get(f).unwrap_or(&self.state.sessions)) as f64;
                 let e = score.entry(f.clone()).or_insert((0.0, Vec::new()));
                 e.0 += idf * (*n as f64).sqrt() * 0.5f64.powf(age / TRAIL_HALF_LIFE);
-                if e.1.len() < 4 {
+                if e.1.len() < FAMILIAR_WORDS_SHOWN {
                     e.1.push(w.clone());
                 }
             }
@@ -1053,6 +1061,14 @@ impl Learn {
         self.habits_told.insert(name);
         self.events.push(("learn_used".into(), json!({"what": "habits"})));
         Some(note)
+    }
+
+    fn rarity(&self, word: &str) -> f64 {
+        let seen = self.state.prompts_seen as f64;
+        if self.state.prompts_seen < RARITY_MIN_PROMPTS {
+            return 1.0;
+        }
+        (((seen + 1.0) / (f64::from(*self.state.prompt_words.get(word).unwrap_or(&0)) + 1.0)).ln() / (seen + 1.0).ln()).clamp(0.0, 1.0)
     }
 
     fn evidence(&self, shared: &[&String], theirs: &[String]) -> Option<(f64, f64)> {
@@ -1137,23 +1153,6 @@ impl Learn {
         self.trail().filter(|t| t.turns > 0).map(|t| t.last_steps)
     }
 
-    pub fn note_kinds(&self) -> Vec<String> {
-        let mut kinds: Vec<String> = Vec::new();
-        for (name, detail) in &self.events {
-            let kind = match (name.as_str(), detail["what"].as_str().unwrap_or("")) {
-                ("learn_used", "answers") => "answer",
-                ("learn_used", "regress" | "restore") => "regress",
-                ("learn_used", "warm") => "familiar",
-                ("learn_used", what @ ("resume" | "lessons" | "trail" | "habits")) => what,
-                _ => continue,
-            };
-            if !kinds.iter().any(|k| k == kind) {
-                kinds.push(kind.to_string());
-            }
-        }
-        kinds
-    }
-
     fn trail_note(&mut self) -> Option<String> {
         let t = self.trail()?.clone();
         if t.turns == 0 || unix_now().saturating_sub(t.at) > RESUME_MAX_SECS {
@@ -1192,19 +1191,19 @@ impl Learn {
         if known.is_empty() { json!({}) } else { json!({"knownFailures": known}) }
     }
 
-    pub fn brief(&mut self, prompt: &str) -> Option<String> {
+    pub fn brief(&mut self, prompt: &str) -> Vec<(&'static str, String)> {
         let asks_new = substantive(prompt);
         let task = self.task_request(prompt);
         let prompt = task.as_str();
         let warm = self.warm(prompt);
         self.familiarity = warm.as_ref().map(|w| w.score);
         let files: Vec<String> = warm.as_ref().map(|w| w.files.clone()).unwrap_or_default();
-        let mut parts: Vec<String> = Vec::new();
+        let mut parts: Vec<(&'static str, String)> = Vec::new();
         if let Some(r) = self.resume_note(prompt) {
-            parts.push(r);
+            parts.push(("resume", r));
         } else if !asks_new {
             if let Some(t) = self.trail_note() {
-                parts.push(t);
+                parts.push(("trail", t));
             }
         }
         if asks_new {
@@ -1216,21 +1215,21 @@ impl Learn {
             self.offered = chosen.clone();
             if let Some((a, _)) = chosen {
                 let note = self.answer_note(&a);
-                parts.push(note);
+                parts.push(("answer", note));
             }
             if let Some(r) = self.regressions(prompt) {
-                parts.push(r);
+                parts.push(("regress", r));
             }
         }
         if let Some(l) = self.lessons_for(prompt, &files) {
             self.events.push(("learn_used".into(), json!({"what": "lessons"})));
-            parts.push(l);
+            parts.push(("lessons", l));
         }
         if let Some(w) = warm {
             self.noted_familiar = w.files.clone();
-            parts.push(w.note);
+            parts.push(("familiar", w.note));
         }
-        (!parts.is_empty()).then(|| parts.join("\n"))
+        parts
     }
 
     pub fn finish(&mut self, prompt: &str, finished: bool, steps: usize, answer: &str) {
@@ -1270,7 +1269,9 @@ impl Learn {
             at: unix_now(),
         });
         let changed: Vec<String> = self.touched.iter().filter(|t| !is_test_file(t) && learnable(t)).cloned().collect();
-        if asks_new && finished && changed.is_empty() && on("answers") && !answer.trim().is_empty() && self.informative(prompt) {
+        self.state.answers.retain(|a| a.request.chars().count() < ANSWER_MAX_REQUEST);
+        let asked_briefly = prompt.chars().count() < ANSWER_MAX_REQUEST;
+        if asks_new && finished && changed.is_empty() && !self.acted && asked_briefly && on("answers") && !answer.trim().is_empty() && self.informative(prompt) {
             let cited: Vec<(String, String)> = regex::Regex::new(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9]+")
                 .unwrap()
                 .find_iter(answer)
@@ -1337,7 +1338,8 @@ impl Learn {
             let asked = words(prompt);
             let targets: Vec<&String> = changed.iter().filter(|f| trail_target(f)).collect();
             let targets: Vec<&String> = if targets.len() > TRAIL_FILES_MAX { targets.into_iter().filter(|f| words(f).iter().any(|w| asked.contains(w))).collect() } else { targets };
-            for w in asked.into_iter().filter(|w| !FOLLOW_UP.contains(&w.as_str()) && !QUESTION_WORDS.contains(&w.as_str())).take(40) {
+            let telling: Vec<String> = asked.into_iter().filter(|w| !FOLLOW_UP.contains(&w.as_str()) && !QUESTION_WORDS.contains(&w.as_str()) && self.rarity(w) >= COMMON_WORD_RARITY).take(40).collect();
+            for w in telling {
                 let entry = self.state.trails.entry(w).or_default();
                 for f in &targets {
                     *entry.entry((*f).clone()).or_default() += 1;
@@ -1354,6 +1356,17 @@ impl Learn {
                         self.state.fixes.push(Fix { file: file.clone(), before: before.clone(), after: after.clone(), request: prompt.chars().take(160).collect() });
                     }
                 }
+                let mut kept: BTreeMap<String, usize> = BTreeMap::new();
+                let mut newest_first: Vec<Fix> = Vec::new();
+                for fix in self.state.fixes.drain(..).rev() {
+                    let count = kept.entry(fix.request.clone()).or_default();
+                    if *count < FIXES_PER_REQUEST {
+                        *count += 1;
+                        newest_first.push(fix);
+                    }
+                }
+                newest_first.reverse();
+                self.state.fixes = newest_first;
                 let n = self.state.fixes.len();
                 if n > MAX_FIXES {
                     self.state.fixes.drain(..n - MAX_FIXES);

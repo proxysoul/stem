@@ -24,6 +24,7 @@ Send it first.
 {"id": "1", "result": {"protocol": 1, "stem": "0.2.0", "root": "/path/to/repo", "methods": ["hello", "turn.start", "..."], "callbacks": ["decide"]}}
 ```
 
+- `show`: leave it out. `"all"` shows every kind of note whether it has earned it or not (see `turn.start`); it is for benchmarks.
 - `capabilities`: what the app does. `decide`: it answers the `decide` callback; without it Stem uses only its own matching. `edits`: it sends `edits` and `touched` on every `turn.end`, so Stem takes no git snapshot at `turn.start` and never diffs the working tree. On a large repo that makes `turn.start` about half a second faster (measured: 500 to 1000 ms down to 1 to 150 ms).
 - `decideMs`: how long Stem waits for a `decide` answer before going on without it. Default 2500.
 
@@ -46,14 +47,15 @@ Before the model sees a request. Put the returned `note` in front of the request
 
 ```json
 {"id": "2", "method": "turn.start", "params": {"session": "tab-42", "prompt": "the cart total is wrong", "origin": "user"}}
-{"id": "2", "result": {"note": "[stem: an earlier fix was undone. ...]", "kinds": ["regress"], "familiarity": {"score": 3.4, "priorSteps": 12}}}
+{"id": "2", "result": {"note": "[stem: an earlier fix was undone. ...]", "kinds": ["regress"], "withheld": ["familiar"], "familiarity": {"score": 3.4, "priorSteps": 12}}}
 ```
 
 - `session`: one id per conversation (a tab, a chat). Turns in the same session form one task.
-- `origin`: `user` for the person's own request; `engine` for the app's own automatic turns (a forced continuation, a review round); `link` for messages from other tabs or agents. Only `user` turns start or steer a task. An `engine` turn continues the session's task and answers `{"note": null, "kinds": [], "continues": true}`; what it changes is learned under that task's request. With no task behind it, and for `link`, the answer is `{"note": null, "kinds": [], "skipped": ...}`.
-- `task`: optional, the conversation's request as the app knows it. Stem uses it when a follow-up arrives in a conversation it has not seen before.
+- `origin`: `user` for the person's own request; `engine` for the app's own automatic turns (a forced continuation, a review round); `link` for messages from other tabs or agents. Only `user` turns start or steer a task. An `engine` turn continues the session's task and answers `{"note": null, "kinds": [], "continues": true}`; what it changes is learned under that task's request. When Stem has no task for the session, it takes the one in `task`. With no task at all, for `link`, and for any other origin (an app may send its own, such as `agent` for prompts written by another agent), the answer is `{"note": null, "kinds": [], "skipped": ...}`. No origin is ever rejected.
+- `task`: optional, the conversation's request as the app knows it. Stem uses it when a follow-up or an `engine` turn arrives in a conversation it has not seen before.
 - `note` is null when Stem has nothing useful. A short follow-up such as "continue" or "yeah do it" never brings back an old answer or fix.
 - `kinds`: which kinds of note are in `note`: `familiar`, `answer`, `regress`, `resume`, `lessons`, `trail`.
+- `withheld`: kinds Stem worked out for this turn and left out of `note`, because that kind has not earned being shown in this project. A kind earns it by being right: over at least 10 turns, the turn went on to do what the note said in at least half (see `followed` under `turn.end`), whether the note was shown or not. `familiar` and `habits` start withheld. `regress` and `answer` are shown until they have 10 turns on record, then have to hold the same rate. `lessons` at the start of a turn follow `familiar`. `resume`, `trail` and the notes tied to an opened file are always shown. `status` reports where each kind stands.
 - A short follow-up in the same session gets the task so far (`trail`): its request, the files it changed and how the last turn ended. Another session's follow-up gets nothing from it.
 - `answer`, when an earlier answer fits: `{"text", "request", "files", "sure"}`. `sure` is true only when the wording is nearly identical, so the app may show the answer before running the model. A match picked through `decide` has `sure: false`.
 - `familiarity`, when earlier work matches: `{"score", "priorSteps"}`. `priorSteps` is how many steps the last turn of this session's task took, or null.
@@ -74,7 +76,7 @@ Before a tool call runs. Apply what comes back.
   - `read` or `edit` of a file where an earlier fix has been undone: the fix, and the request it was for.
   - `edit` or `write` of a file that has feedback on an earlier fix: that feedback.
   - the first `edit` or `write` in an area of the project: that area's usual checks (below).
-- Usual checks: the commands earlier turns ran after changing files there, such as `cd apps/desktop && bun run typecheck` (9 of 21 turns). A command is offered once at least three turns used it and at least 30% of the turns in that area did.
+- Usual checks: the commands earlier turns ran after changing files there, such as `cd packages/web && npm run typecheck` (9 of 21 turns). A command is offered once at least three turns used it and at least 30% of the turns in that area did.
 - Call names and arguments are Stem's `$` API: `sh {cmd}`, `read {path}`, `grep {pattern, path}`, `edit {path}`, `write {path}`, `test {filter}`.
 
 ### `tool.result`
@@ -96,22 +98,22 @@ When the model's reply is done.
 
 ```json
 {"id": "5", "method": "turn.end", "params": {"session": "tab-42", "answer": "Fixed total() ...", "finished": true, "origin": "user", "edits": [{"file": "src/price.ts", "before": "...", "after": "..."}], "touched": ["src/price.ts"], "tests": ["src/price.test.ts"], "usage": {"model": "claude-sonnet-5-5", "cost": 0.42, "inputTokens": 81000, "outputTokens": 2300, "cacheRead": 64000, "cacheWrite": 9000, "steps": 9, "toolOutputChars": 30400, "repeatReads": 3, "durationMs": 61000}}}
-{"id": "5", "result": {"request": "the cart total is wrong", "edits": 1, "files": ["src/price.ts"], "kinds": ["regress"], "followed": ["regress"], "usageStored": true}}
+{"id": "5", "result": {"request": "the cart total is wrong", "edits": 1, "files": ["src/price.ts"], "kinds": ["regress"], "withheld": [], "followed": ["regress"], "usageStored": true}}
 ```
 
 - `finished`: false when the turn stopped early. Stem keeps it as work to resume.
 - `edits` and `touched`: what this session changed. Send them when several sessions share one working tree, so each learns only its own changes. When left out, Stem reads the git diff since `turn.start`.
 - `tests`: test files the turn ran.
-- `usage`: what the turn cost. Every field is optional. It is stored for every `turn.end`, whatever its `origin`, with the session's task and the kinds of note the turn got; `usageStored` says so. `inputTokens` counts everything sent to the model over the turn, cache reads and cache writes included. `cost` is the list price of those tokens, not money paid: on a subscription nothing is charged per turn. Leave `cost` out when the price is unknown; a missing cost is left out of the medians, a cost of 0 counts as 0.
+- `usage`: what the turn cost. Every field is optional. A row is stored for every `turn.end`, whatever its `origin` and even without `usage`, with the session's task and the kinds of note the turn got or had withheld; `usageStored` says so. `inputTokens` counts everything sent to the model over the turn, cache reads and cache writes included. `cost` is the list price of those tokens, not money paid: on a subscription nothing is charged per turn. Leave `cost` out when the price is unknown; a missing cost is left out of the medians, a cost of 0 counts as 0.
 - `shown`: false when the app did not give Stem's note to the model (a shadow run, a withheld note). Leave it out when it did.
-- `kinds` in the answer: every kind of note this turn got, at the start or with a tool result. `followed`: the ones the turn acted on:
+- `kinds` in the answer: every kind of note this turn got, at the start or with a tool result. `withheld`: the kinds Stem worked out and held back. `followed`: the ones, shown or withheld, that the turn bore out:
   - `familiar`: the session wrote one of the files the note named.
   - `regress`: the earlier fix is back in the file at turn end.
-  - `answer`: the turn finished in two steps or fewer without changing a file.
+  - `answer`: the turn changed no file and either finished in two steps or fewer, or its answer cites a file the earlier answer cited.
   - `habits`: one of the offered commands was run later in the turn.
   - `resume`: the turn finished. `trail`: the turn finished with `repeatReads` 0.
   - `lessons` and `known` have no such test.
-- An `engine` turn that continues a task is learned from like the user's own. A `link` turn, and an `engine` turn with no task, answer `{"skipped": ..., "usageStored": ...}`: nothing is learned, the usage is still stored.
+- An `engine` turn that continues a task is learned from like the user's own, except that it never stores an answer. A turn of any other origin, and an `engine` turn with no task, answer `{"skipped": ..., "usageStored": ...}`: nothing is learned, the usage is still stored.
 
 ### `feedback`
 
@@ -128,17 +130,21 @@ What Stem knows about this project, for a panel or a status chip.
 ```json
 {"id": "7", "method": "status"}
 {"id": "7", "result": {"sessions": 214, "fixes": 61, "answers": 9, "lessons": 2, "knownFailures": 1, "familiarWords": 340, "testCommand": "bun test <files>", "resume": false,
-  "habits": [{"area": "apps/desktop", "turns": 59, "checks": [{"cmd": "bun run lint:ds", "runs": 14, "passed": 11}]}],
+  "habits": [{"area": "packages/web", "turns": 59, "checks": [{"cmd": "npm run lint", "runs": 14, "passed": 11}]}],
   "usage": {
     "turns": 180,
     "byNote": {"none": {"turns": 120, "medianCost": 0.9, "medianTokens": 52000, "medianFreshTokens": 6100, "medianSteps": 5, "medianRepeatReads": 1},
                "familiar": {"turns": 41, "medianCost": 1.4, "medianTokens": 70000, "medianFreshTokens": 8800, "medianSteps": 9, "medianRepeatReads": 2, "followed": 17}},
     "notShown": {"familiar": {"turns": 12, "medianCost": 1.6, "medianTokens": 74000, "medianFreshTokens": 9100, "medianSteps": 10, "medianRepeatReads": 3, "followed": 0}},
-    "tasks": {"count": 64, "byNote": {"none": {"tasks": 40, "medianCost": 2.1, "medianTurns": 2, "medianSteps": 11}}, "notShown": {}}}}}
+    "kinds": {"familiar": {"turns": 30, "followed": 5, "state": "withheld", "needsTurns": 10, "needsRate": 0.5}, "habits": {"turns": 22, "followed": 17, "state": "proven", "needsTurns": 10, "needsRate": 0.5},
+              "regress": {"turns": 0, "followed": 0, "state": "shown until judged", "needsTurns": 10, "needsRate": 0.5}, "answer": {"turns": 0, "followed": 0, "state": "shown until judged", "needsTurns": 10, "needsRate": 0.5}},
+    "tasks": {"count": 64, "unassigned": {"turns": 20, "cost": 31.4}, "byNote": {"none": {"tasks": 40, "medianCost": 2.1, "medianTurns": 2, "medianSteps": 11}}, "notShown": {}}}}}
 ```
 
 - `usage.byNote`: turns whose note reached the model, under every kind they got (`familiar`, `answer`, `regress`, `resume`, `lessons`, `trail`, `habits`, `known`). `none`: turns where Stem had nothing to say.
-- `usage.notShown`: turns where Stem had a note of that kind and the app did not show it. Same kind of turn, no note: the fair side to compare `byNote` with.
+- `usage.notShown`: turns where Stem had a note of that kind and it was not shown, by the app (`shown: false`) or by Stem (`withheld`). Same kind of turn, no note: the fair side to compare `byNote` with.
+- `usage.kinds`: the record of each kind that has to earn being shown. `state` is `probation` (withheld, fewer than `needsTurns`), `withheld` (judged, right less often than `needsRate`), `shown until judged`, or `proven`.
+- `usage.tasks.unassigned`: turns that belong to no task, such as messages into a conversation where the user never asked anything.
 - `medianTokens` is input plus output. `medianFreshTokens` leaves cache reads out: input minus `cacheRead`, plus output. Medians of an even count are the mean of the two middle values. `followed` is a count of turns.
 - `usage.tasks`: the same split per task. A task is one request in one session with every turn that followed it, the app's own continuations included; its cost is the sum of its turns.
 - Costs are list prices (see `turn.end`), so read them as size, not as a bill.
@@ -173,10 +179,12 @@ On 28 reworded, vague, French and Arabic reports of 7 fixed hono bugs, with each
 | `decide` with Sonnet 5.5 | 28 / 28 | 0 | 0 / 28 | 1.4 s | $0.021 |
 | `decide` with Opus 5.5, medium effort | 28 / 28 | 0 | 0 / 28 | 1.7 s | $0.060 |
 
-On 97 real editing turns from one large TypeScript, Swift and Kotlin project, replayed in order through `stem host` (the first 30% only for learning): Stem offered usual checks on 36 of 68 turns, and in 22 of those 36 the turn went on to run at least one of them; 43 of the 87 commands offered were run. The log those turns come from cuts long scripts short, so the real numbers are higher.
+On 97 real editing turns from one large mixed-language project, replayed in order through `stem host` (the first 30% only for learning): Stem offered usual checks on 36 of 68 turns, and in 22 of those 36 the turn went on to run at least one of them; 43 of the 87 commands offered were run. The log those turns come from cuts long scripts short, so the real numbers are higher.
 
 On 141 real requests from that project, asked after Stem had seen 398 earlier ones and with its recent fixes reverted in the code: 4 got an "earlier fix was undone" note at the start (3 were the fix's own request again, 1 named the fixed file), 2 got an earlier answer (both the same question again), none got feedback or a familiar-files note. The first version of these rules gave 19 fix notes and 22 feedback notes on the same requests, nearly all wrong.
 
+Two days of real use in that project, with every note withheld, is why kinds have to earn being shown: the usual checks were borne out in 12 of 17 turns, the familiar-files note in 4 of 27.
+
 ## Reference host
 
-`tests/host.ts` drives `stem host` end to end on a fresh repo: `bun tests/host.ts [path to stem]`. `tests/smoke.sh` runs it too. It checks every method, a `decide` that is accepted, declined and never answered, follow-ups and the task so far, the app's own continuations, messages from other tabs, rules, notes on opening a file, usual checks, known failures, import, usage against an independent recount, and an app that reports its own edits.
+`tests/host.ts` drives `stem host` end to end on a fresh repo: `bun tests/host.ts [path to stem]`. `tests/smoke.sh` runs it too. It checks every method, a `decide` that is accepted, declined and never answered, follow-ups and the task so far, the app's own continuations, messages from other tabs, rules, notes on opening a file, usual checks, known failures, import, usage against an independent recount, an app that reports its own edits, and kinds being withheld until they earn being shown.

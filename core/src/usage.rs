@@ -7,12 +7,78 @@ const MAX_BYTES: u64 = 4_000_000;
 const KEEP_LINES: usize = 4_000;
 const FOLLOWABLE: &[&str] = &["familiar", "regress", "answer", "habits", "resume", "trail"];
 const UNNOTED: &str = "none";
+pub const EARNING: &[&str] = &["familiar", "regress", "answer", "habits"];
+const SHOWN_UNTIL_JUDGED: &[&str] = &["regress", "answer"];
+const PROVEN_MIN_TURNS: usize = 10;
+const PROVEN_MIN_RATE: f64 = 0.5;
+
+#[derive(Default, Clone, Copy)]
+pub struct Record {
+    pub turns: usize,
+    pub followed: usize,
+}
+
+pub type Records = BTreeMap<String, Record>;
+
+fn rows(root: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path(root)).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+fn strings(list: &Value) -> Vec<String> {
+    list.as_array().map(|a| a.iter().filter_map(|k| k.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+fn tally(rows: &[Value]) -> Records {
+    let mut records = Records::new();
+    for row in rows {
+        let followed = strings(&row["followed"]);
+        for kind in kinds_of(row).into_iter().chain(strings(&row["withheld"])) {
+            let record = records.entry(kind.clone()).or_default();
+            record.turns += 1;
+            record.followed += usize::from(followed.contains(&kind));
+        }
+    }
+    records
+}
+
+pub fn records(root: &Path) -> Records {
+    tally(&rows(root))
+}
+
+pub fn proven(records: &Records, kind: &str) -> bool {
+    if !EARNING.contains(&kind) {
+        return true;
+    }
+    let record = records.get(kind).copied().unwrap_or_default();
+    if record.turns < PROVEN_MIN_TURNS {
+        return SHOWN_UNTIL_JUDGED.contains(&kind);
+    }
+    record.followed as f64 / record.turns as f64 >= PROVEN_MIN_RATE
+}
+
+fn state(records: &Records, kind: &str) -> &'static str {
+    let judged = records.get(kind).is_some_and(|r| r.turns >= PROVEN_MIN_TURNS);
+    match (judged, proven(records, kind)) {
+        (true, true) => "proven",
+        (false, true) => "shown until judged",
+        (true, false) => "withheld",
+        (false, false) => "probation",
+    }
+}
+
+pub fn shows(records: &Records, kind: &str) -> bool {
+    match kind {
+        "lessons" => proven(records, "familiar"),
+        other => proven(records, other),
+    }
+}
 
 pub struct Turn<'a> {
     pub session: &'a str,
     pub task: Option<u64>,
     pub origin: &'a str,
     pub kinds: &'a [String],
+    pub withheld: &'a [String],
     pub followed: &'a [String],
     pub shown: bool,
     pub finished: bool,
@@ -29,18 +95,18 @@ fn now_ms() -> u64 {
 
 pub fn record(root: &Path, turn: &Turn) -> bool {
     use std::io::Write;
-    let Some(given) = turn.usage.as_object() else { return false };
     let mut row = Map::new();
     row.insert("at".into(), json!(now_ms()));
     row.insert("session".into(), json!(turn.session));
     row.insert("task".into(), json!(turn.task));
     row.insert("origin".into(), json!(turn.origin));
     row.insert("kinds".into(), json!(turn.kinds));
+    row.insert("withheld".into(), json!(turn.withheld));
     row.insert("followed".into(), json!(turn.followed));
     row.insert("shown".into(), json!(turn.shown));
     row.insert("finished".into(), json!(turn.finished));
     for field in FIELDS {
-        if let Some(v) = given.get(*field).filter(|v| v.is_number() || v.is_string()) {
+        if let Some(v) = turn.usage.get(*field).filter(|v| v.is_number() || v.is_string()) {
             row.insert((*field).into(), v.clone());
         }
     }
@@ -132,9 +198,19 @@ fn tasks_by(tasks: &[Task], kinds: &dyn Fn(&Task) -> Vec<String>) -> Value {
 }
 
 pub fn summary(root: &Path) -> Value {
-    let rows: Vec<Value> = std::fs::read_to_string(path(root)).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-    let noted = |row: &Value| if kinds_of(row).is_empty() { vec![UNNOTED.to_string()] } else if shown(row) { kinds_of(row) } else { Vec::new() };
-    let withheld = |row: &Value| if shown(row) { Vec::new() } else { kinds_of(row) };
+    let rows = rows(root);
+    let held_back = |row: &Value| strings(&row["withheld"]);
+    let noted = |row: &Value| if kinds_of(row).is_empty() && held_back(row).is_empty() { vec![UNNOTED.to_string()] } else if shown(row) { kinds_of(row) } else { Vec::new() };
+    let withheld = |row: &Value| if shown(row) { held_back(row) } else { kinds_of(row).into_iter().chain(held_back(row)).collect() };
+    let records = tally(&rows);
+    let earning: Map<String, Value> = EARNING
+        .iter()
+        .map(|kind| {
+            let record = records.get(*kind).copied().unwrap_or_default();
+            ((*kind).to_string(), json!({"turns": record.turns, "followed": record.followed, "state": state(&records, kind), "needsTurns": PROVEN_MIN_TURNS, "needsRate": PROVEN_MIN_RATE}))
+        })
+        .collect();
+    let unassigned: Vec<&Value> = rows.iter().filter(|r| r["task"].as_u64().is_none()).collect();
     let mut grouped: BTreeMap<(String, u64), Task> = BTreeMap::new();
     for row in &rows {
         let (Some(session), Some(id)) = (row["session"].as_str(), row["task"].as_u64()) else { continue };
@@ -144,10 +220,14 @@ pub fn summary(root: &Path) -> Value {
         if let Some(cost) = row["cost"].as_f64() {
             task.cost = Some(task.cost.unwrap_or(0.0) + cost);
         }
-        let list = if shown(row) { &mut task.shown } else { &mut task.withheld };
-        for kind in kinds_of(row) {
-            if !list.contains(&kind) {
-                list.push(kind);
+        for kind in noted(row).into_iter().filter(|k| k != UNNOTED) {
+            if !task.shown.contains(&kind) {
+                task.shown.push(kind);
+            }
+        }
+        for kind in withheld(row) {
+            if !task.withheld.contains(&kind) {
+                task.withheld.push(kind);
             }
         }
     }
@@ -156,8 +236,10 @@ pub fn summary(root: &Path) -> Value {
         "turns": rows.len(),
         "byNote": by_kind(rows.iter(), &noted),
         "notShown": by_kind(rows.iter(), &withheld),
+        "kinds": earning,
         "tasks": {
             "count": tasks.len(),
+            "unassigned": {"turns": unassigned.len(), "cost": unassigned.iter().filter_map(|r| r["cost"].as_f64()).sum::<f64>()},
             "byNote": tasks_by(&tasks, &|t| if t.shown.is_empty() && t.withheld.is_empty() { vec![UNNOTED.to_string()] } else { t.shown.clone() }),
             "notShown": tasks_by(&tasks, &|t| t.withheld.iter().filter(|k| !t.shown.contains(k)).cloned().collect()),
         },
