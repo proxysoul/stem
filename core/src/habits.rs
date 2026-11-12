@@ -6,7 +6,7 @@ const LOOKING: &[&str] = &[
     "ls", "cat", "sed", "grep", "rg", "head", "tail", "wc", "find", "echo", "cd", "pwd", "stat", "date", "sleep", "ps", "pgrep", "lsof", "which", "file", "du", "df", "mkdir", "cp", "mv", "rm", "touch", "printf", "curl", "open", "kill", "pkill", "for", "while", "if",
     "test", "[", "export", "source", "true", "false", "diff", "tree", "less", "more", "awk", "sort", "uniq", "cut", "tr", "xargs", "env", "set", "git", "gh", "chmod", "ln", "tar", "unzip", "jq", "tee", "time", "nohup", "wait", "read", "exit", "return",
 ];
-const INLINE_FLAGS: &[&str] = &["-e", "-c", "-p", "--eval", "--print"];
+const INLINE_FLAGS: &[&str] = &["-e", "-c", "-p", "-", "--eval", "--print"];
 const SHELL_WORDS: &[&str] = &["do", "done", "then", "else", "elif", "fi", "esac", "case", "in", "function", "{", "}", "(", ")"];
 const READS_ONLY: &[&str] = &[
     "ls", "cat", "sed", "grep", "rg", "head", "tail", "wc", "find", "echo", "cd", "pwd", "stat", "date", "sleep", "ps", "pgrep", "lsof", "which", "file", "du", "df", "printf", "test", "[", "true", "false", "diff", "tree", "less", "more", "awk", "sort", "uniq",
