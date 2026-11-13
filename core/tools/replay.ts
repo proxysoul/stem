@@ -97,7 +97,6 @@ console.log(
       learned: { fixes: status.fixes, answers: status.answers, lessons: status.lessons, usualCheckAreas: (status.habits ?? []).length },
       kinds: rated(overall),
       byMode: Object.fromEntries(Object.entries(byMode).map(([mode, tally]) => [mode, rated(tally)])),
-      expectedSteps: status.usage?.expectedSteps,
       usualChecks: (status.habits ?? []).slice(0, 8),
     },
     null,

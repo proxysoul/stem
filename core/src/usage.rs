@@ -89,7 +89,6 @@ pub struct Turn<'a> {
     pub finished: bool,
     pub usage: &'a Value,
     pub rule_hits: usize,
-    pub expected_steps: Option<u64>,
 }
 
 fn path(root: &Path) -> PathBuf {
@@ -113,9 +112,6 @@ pub fn record(root: &Path, turn: &Turn) -> bool {
     row.insert("shown".into(), json!(turn.shown));
     row.insert("finished".into(), json!(turn.finished));
     row.insert("ruleHits".into(), json!(turn.rule_hits));
-    if let Some(expected) = turn.expected_steps {
-        row.insert("expectedSteps".into(), json!(expected));
-    }
     for field in FIELDS {
         if let Some(v) = turn.usage.get(*field).filter(|v| v.is_number() || v.is_string()) {
             row.insert((*field).into(), v.clone());
@@ -226,13 +222,7 @@ pub fn summary(root: &Path) -> Value {
             ((*kind).to_string(), json!({"turns": record.turns, "followed": record.followed, "state": "always shown"}))
         }))
         .collect();
-    let predicted: Vec<(f64, f64)> = rows.iter().filter_map(|r| Some((r["expectedSteps"].as_f64()?, r["steps"].as_f64()?))).collect();
-    let expected = json!({
-        "turns": predicted.len(),
-        "medianError": median(predicted.iter().map(|(e, s)| (e - s).abs()).collect()),
-        "medianSteps": median(predicted.iter().map(|(_, s)| *s).collect()),
-        "medianErrorOfMedian": median(predicted.iter().map(|(_, s)| (s - median(predicted.iter().map(|(_, s)| *s).collect()).unwrap_or(0.0)).abs()).collect()),
-    });
+
     let unassigned: Vec<&Value> = rows.iter().filter(|r| r["task"].as_u64().is_none()).collect();
     let mut grouped: BTreeMap<(String, u64), Task> = BTreeMap::new();
     for row in &rows {
@@ -260,7 +250,6 @@ pub fn summary(root: &Path) -> Value {
         "byNote": by_kind(rows.iter(), &noted),
         "notShown": by_kind(rows.iter(), &withheld),
         "kinds": earning,
-        "expectedSteps": expected,
         "tasks": {
             "count": tasks.len(),
             "unassigned": {"turns": unassigned.len(), "cost": unassigned.iter().filter_map(|r| r["cost"].as_f64()).sum::<f64>()},

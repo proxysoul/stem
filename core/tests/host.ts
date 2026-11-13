@@ -338,10 +338,9 @@ const call3 = (method: string, params: object = {}) =>
   });
 await call3("hello", { protocol: 1 });
 const earning = (await call3("status")).result.usage.kinds;
-check("status reports the task trail and how well expected steps match", earning.trail?.state === "always shown" && typeof (await call3("status")).result.usage.expectedSteps?.turns === "number", earning.trail);
+check("status reports the task trail", earning.trail?.state === "always shown", earning.trail);
 check("status says which kinds of note have earned being shown", ["probation", "withheld"].includes(earning.familiar?.state) && earning.habits?.state === "probation" && earning.regress?.state === "shown until judged" && earning.answer?.state === "shown until judged" && earning.familiar.needsTurns === 10, earning);
 const gated = await call3("turn.start", { session: "tab-g1", prompt: "tax helper should accept a custom rate", origin: "user" });
-check("a familiar task comes with how many steps similar work took, even while the note itself is withheld", typeof gated.result?.familiarity?.expectedSteps === "number" && gated.result.familiarity.expectedSteps > 0, gated.result?.familiarity);
 const gatedEdit = await call3("rule.check", { session: "tab-g1", call: "edit", args: { path: "src/price.ts" } });
 const gatedEnd = await call3("turn.end", { session: "tab-g1", answer: "", finished: true, edits: [], touched: [] });
 check(

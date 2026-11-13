@@ -155,7 +155,7 @@ fn fix_triples(list: &Value) -> Vec<(String, String, String)> {
 pub fn usage_only(root: &Path, session: &str, origin: &str, finished: bool, shown: bool, usage: &Value) -> bool {
     let mut learn = Learn::open(root);
     learn.session = Some(session.to_string());
-    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], withheld: &[], followed: &[], shown, finished, usage, rule_hits: 0, expected_steps: None })
+    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], withheld: &[], followed: &[], shown, finished, usage, rule_hits: 0 })
 }
 
 pub fn end(root: &Path, session: &str, answer: &str, finished: bool) -> Value {
@@ -220,7 +220,7 @@ pub fn end_with(root: &Path, session: &str, answer: &str, finished: bool, report
     learn.acted = reported.acted || reported.origin.as_deref().is_some_and(|o| o != ORIGIN_USER);
     learn.external(prompt, answer, edits, touched, finished, reported.usage["steps"].as_u64().unwrap_or(0) as usize);
     let origin = reported.origin.as_deref().unwrap_or(ORIGIN_USER);
-    let turn = crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &kinds, withheld: &withheld, followed: &followed, shown: reported.shown.unwrap_or(true), finished, usage: &reported.usage, rule_hits: reported.rule_hits, expected_steps: p["expected"].as_u64() };
+    let turn = crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &kinds, withheld: &withheld, followed: &followed, shown: reported.shown.unwrap_or(true), finished, usage: &reported.usage, rule_hits: reported.rule_hits };
     summary["usageStored"] = json!(crate::usage::record(root, &turn));
     summary
 }
@@ -274,10 +274,10 @@ pub fn begin_with(root: &Path, session: &str, prompt: &str, options: Begin) -> S
     write_pending(
         root,
         session,
-        &json!({"prompt": prompt, "base": base, "untracked": others, "at": now(), "note": note, "kinds": kinds, "withheld": withheld, "familiar": learn.noted_familiar, "expected": learn.expected_steps, "resumed": learn.noted_resume, "regress": learn.noted_regress, "answered": learn.offered.as_ref().map(|(a, _)| a.files.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>()), "task": options.task}),
+        &json!({"prompt": prompt, "base": base, "untracked": others, "at": now(), "note": note, "kinds": kinds, "withheld": withheld, "familiar": learn.noted_familiar, "resumed": learn.noted_resume, "regress": learn.noted_regress, "answered": learn.offered.as_ref().map(|(a, _)| a.files.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>()), "task": options.task}),
     );
     let answer = learn.offered.as_ref().filter(|_| answer_shown).map(|(a, sure)| json!({"text": a.answer, "request": a.request, "files": a.files.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(), "sure": sure}));
-    let familiarity = learn.familiarity.map(|score| json!({"score": (score * 100.0).round() / 100.0, "priorSteps": learn.prior_steps(), "expectedSteps": learn.expected_steps}));
+    let familiarity = learn.familiarity.map(|score| json!({"score": (score * 100.0).round() / 100.0, "priorSteps": learn.prior_steps()}));
     Started { note, kinds, withheld, answer, familiarity, noted_regress: learn.noted_regress.clone() }
 }
 

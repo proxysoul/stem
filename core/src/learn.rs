@@ -234,7 +234,6 @@ pub struct Learn {
     pub acted: bool,
     pub noted_resume: Vec<String>,
     pub checks_before: Vec<String>,
-    pub expected_steps: Option<u32>,
 }
 
 pub fn applied(now: &str, before: &str, after: &str) -> bool {
@@ -395,7 +394,7 @@ impl Learn {
         let dir = crate::env::project_home(root).join("learn");
         let enabled = std::env::var("STEM_LEARN").map(|v| v != "off" && v != "0").unwrap_or(true);
         let state: State = if enabled { std::fs::read_to_string(dir.join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default() } else { State::default() };
-        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new(), acted: false, noted_resume: Vec::new(), checks_before: Vec::new(), expected_steps: None }
+        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new(), acted: false, noted_resume: Vec::new(), checks_before: Vec::new() }
     }
 
     fn lock(&self) -> Option<StateLock> {
@@ -1222,7 +1221,6 @@ impl Learn {
         let prompt = task.as_str();
         let warm = self.warm(prompt);
         self.familiarity = warm.as_ref().map(|w| w.score);
-        self.expected_steps = warm.as_ref().and_then(|w| crate::habits::expected_steps(&self.state.habits, &w.files));
         let files: Vec<String> = warm.as_ref().map(|w| w.files.clone()).unwrap_or_default();
         let mut parts: Vec<(&'static str, String)> = Vec::new();
         if let Some(r) = self.resume_note(prompt) {
@@ -1354,7 +1352,7 @@ impl Learn {
         if on("habits") {
             let worked_on: Vec<String> = changed.iter().filter(|f| trail_target(f)).cloned().collect();
             if !worked_on.is_empty() {
-                crate::habits::learn(&mut self.state.habits, &worked_on, &self.checks_run, &self.checks_before, self.state.sessions, steps as u32);
+                crate::habits::learn(&mut self.state.habits, &worked_on, &self.checks_run, &self.checks_before, self.state.sessions);
             }
         }
         self.state.last_changed = changed.clone();
