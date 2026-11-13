@@ -247,7 +247,7 @@ pub fn note(name: &str, area: &Area) -> Option<String> {
         return None;
     }
     let list = found.iter().map(|(cmd, c)| format!("`{cmd}` ({} of {} turns)", c.runs, area.turns)).collect::<Vec<_>>().join(", ");
-    Some(format!("after changes in {name}, earlier turns in this project checked their work with: {list}. Run the ones that fit this change before you answer."))
+    Some(format!("after changes in {name}, earlier turns in this project usually checked their work with: {list}. Use them if this change needs checking and the user has not asked you to skip checks."))
 }
 
 pub fn summary(habits: &Habits) -> Value {

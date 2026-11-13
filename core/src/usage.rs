@@ -11,6 +11,7 @@ pub const EARNING: &[&str] = &["familiar", "regress", "answer", "habits", "resum
 const SHOWN_UNTIL_JUDGED: &[&str] = &["regress", "answer", "resume"];
 const PROVEN_MIN_TURNS: usize = 10;
 const PROVEN_MIN_RATE: f64 = 0.5;
+const JUDGED_ON_LAST: usize = 30;
 
 #[derive(Default, Clone, Copy)]
 pub struct Record {
@@ -30,10 +31,13 @@ fn strings(list: &Value) -> Vec<String> {
 
 fn tally(rows: &[Value]) -> Records {
     let mut records = Records::new();
-    for row in rows {
+    for row in rows.iter().rev() {
         let followed = strings(&row["followed"]);
         for kind in kinds_of(row).into_iter().chain(strings(&row["withheld"])) {
             let record = records.entry(kind.clone()).or_default();
+            if record.turns >= JUDGED_ON_LAST {
+                continue;
+            }
             record.turns += 1;
             record.followed += usize::from(followed.contains(&kind));
         }
