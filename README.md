@@ -25,7 +25,7 @@ Prebuilt for macOS and Linux (Apple Silicon, Intel, x64, arm64). Windows is not 
 - **Small context.** A script can read a thousand files and return three lines. Only those three lines cost tokens.
 - **Prompt cache first.** History is append-only, so every turn reuses the cache. `/cache 1h` for long sessions.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="brand/readme/grow-dark.svg"><img alt="Growth: a script shape that ran three times is saved as a named function with a self-check, listed in the prompt with its use count, and dropped when unused for 21 days or failing more than it works." src="brand/readme/grow-light.svg" width="100%"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="brand/readme/learn-dark.svg"><img alt="Learning: Stem records what each turn does: the files it wrote, the commands it ran after editing, the fixes that stayed. From that it makes notes, such as where to start, which checks this part of the project usually runs, and which earlier fix was undone. Every note is scored against what the turn then did, and a kind of note is shown only once it has been right in at least half of ten turns." src="brand/readme/learn-light.svg" width="100%"></picture>
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="brand/readme/facts-dark.svg"><img alt="Code facts: tree-sitter for TypeScript, JavaScript, Rust, Python and Go, git history and co-change, and language servers. 8,079 files indexed in 3.9 seconds, then under a millisecond per query." src="brand/readme/facts-light.svg" width="100%"></picture>
 

@@ -311,14 +311,14 @@ ${frameEdge(t, h)}`;
   return svg(t, h, "The loop: you give a task, the model answers in text or one JavaScript block, the block runs in a QuickJS sandbox that only sees $ (edit, rename, test, sh, sql, refs, testsFor, ask), which reads code facts and language servers, and only the return value goes back to the model.", body);
 }
 
-function grow(t: Theme): string {
+function learn(t: Theme): string {
   const h = 380;
   const total = 12;
   const stages = [
-    { x: 140, title: "same shape, 3 runs", sub: "Stem notices", tone: t.ink },
-    { x: 440, title: "$.save(name, fn)", sub: "with a self-check", tone: t.leaf },
-    { x: 740, title: "named function", sub: "in the prompt, counted", tone: t.violet },
-    { x: 1040, title: "unused or failing", sub: "dropped, with why", tone: t.amber },
+    { x: 140, title: "each turn", sub: "files, commands, fixes", tone: t.ink },
+    { x: 440, title: "a note", sub: "start here, run this check", tone: t.leaf },
+    { x: 740, title: "scored", sub: "did the turn do it?", tone: t.violet },
+    { x: 1040, title: "right too rarely", sub: "withheld, still scored", tone: t.amber },
   ];
   const sprouts = stages
     .map((s, i) => {
@@ -341,12 +341,12 @@ function grow(t: Theme): string {
 <g clip-path="url(#clip)">
 <line x1="64" y1="212" x2="${W - 64}" y2="212" stroke="${t.leaf}" stroke-opacity="0.18" stroke-width="2"/>
 ${sprouts}
-<text x="64" y="64" font-family="${MONO}" font-size="15" letter-spacing="4" fill="${t.leaf}">GROWTH</text>
-<text x="64" y="98" font-family="${SANS}" font-size="28" font-weight="700" fill="${t.text}">Repeated work becomes a tool. Dead tools get pruned.</text>
-<text x="64" y="334" font-family="${MONO}" font-size="14" fill="${t.dim}">.stem/tools/ · checked before saving and on first use · dropped after 21 days unused or 3 failures</text>
+<text x="64" y="64" font-family="${MONO}" font-size="15" letter-spacing="4" fill="${t.leaf}">LEARNING</text>
+<text x="64" y="98" font-family="${SANS}" font-size="28" font-weight="700" fill="${t.text}">Stem learns from what each turn does. Notes have to earn being shown.</text>
+<text x="64" y="334" font-family="${MONO}" font-size="14" fill="${t.dim}">.stem/learn/ · stays on your machine · a kind of note is shown once right in 5 of 10 turns</text>
 </g>
 ${frameEdge(t, h)}`;
-  return svg(t, h, "Growth: a script shape that ran three times is saved as a named function with a self-check, listed in the prompt with its use count, and dropped when unused for 21 days or failing more than it works.", body, "@keyframes fall{0%,40%{transform:translate(0,0) rotate(0)}90%{transform:translate(40px,60px) rotate(40deg);opacity:0}100%{opacity:0}}");
+  return svg(t, h, "Learning: Stem records what each turn does: the files it wrote, the commands it ran after editing, the fixes that stayed. From that it makes notes, such as where to start, which checks this part of the project usually runs, and which earlier fix was undone. Every note is scored against what the turn then did, and a kind of note is shown only once it has been right in at least half of ten turns.", body, "@keyframes fall{0%,40%{transform:translate(0,0) rotate(0)}90%{transform:translate(40px,60px) rotate(40deg);opacity:0}100%{opacity:0}}");
 }
 
 function facts(t: Theme): string {
@@ -418,7 +418,7 @@ ${frameEdge(t, h)}`;
   return svg(t, h, "Measured on six open bugs in a 1M-line TypeScript repo: five fixed and proven, one correctly not reproduced, 64 scripts with 0 failures, 87% of the data scripts touched never reached the model, $1.15 for all six with Opus 5.5.", body);
 }
 
-const builders: Record<string, (t: Theme) => string> = { hero, terminal, loop, grow, facts, proof };
+const builders: Record<string, (t: Theme) => string> = { hero, terminal, loop, learn, facts, proof };
 await mkdir(out, { recursive: true });
 for (const t of THEMES) {
   for (const [name, build] of Object.entries(builders)) {
