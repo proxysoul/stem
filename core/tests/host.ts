@@ -1,13 +1,15 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 const stem = process.argv[2] ?? "stem";
-process.env.STEM_HOME = mkdtempSync(join(tmpdir(), "stem-home-"));
-const dir = mkdtempSync(join(tmpdir(), "stem-host-"));
+const temporary: string[] = [];
+const made = (path: string) => (temporary.push(path), path);
+process.env.STEM_HOME = made(mkdtempSync(join(tmpdir(), "stem-home-")));
+const dir = made(mkdtempSync(join(tmpdir(), "stem-host-")));
 const git = (...args: string[]) => spawnSync("git", args, { cwd: dir, encoding: "utf8" });
 const price = join(dir, "src", "price.ts");
 const right = "export function total(items: { price: number; qty: number }[]): number {\n  let sum = 0\n  for (const it of items) sum += it.price * it.qty\n  return sum\n}\n";
@@ -361,7 +363,7 @@ const hintedEngine = await call3("turn.end", { session: "tab-g3", origin: "engin
 const afterEngine = await call3("turn.start", { session: "tab-g3", prompt: "continue", origin: "user" });
 check("the app's continuation in a conversation Stem has not seen is learned under the app's task", hintedEngine.result?.files?.includes("src/discount.ts") && !hintedEngine.result.skipped && /continues the task: Add a discount helper/.test(afterEngine.result?.note ?? ""), { hintedEngine, afterEngine });
 await call3("shutdown");
-const hostile = mkdtempSync(join(tmpdir(), "stem-hostile-"));
+const hostile = made(mkdtempSync(join(tmpdir(), "stem-hostile-")));
 const inHostile = (...args: string[]) => spawnSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: hostile });
 inHostile("init", "-q");
 spawnSync("mkdir", ["-p", join(hostile, ".stem", "learn"), join(hostile, "src")]);
@@ -396,7 +398,7 @@ check(
 );
 check("a .stem folder the repo committed is never carried into Stem's store", !existsSync(join(String(answerOf("5")?.store ?? ""), "adopted.json")), answerOf("5")?.store);
 
-const earlier = mkdtempSync(join(tmpdir(), "stem-earlier-"));
+const earlier = made(mkdtempSync(join(tmpdir(), "stem-earlier-")));
 spawnSync("git", ["init", "-q"], { cwd: earlier });
 spawnSync("mkdir", ["-p", join(earlier, ".stem", "learn"), join(earlier, "src")]);
 writeFileSync(join(earlier, ".stem", ".gitignore"), "*\n");
@@ -409,7 +411,7 @@ const leaked = spawnSync(stem, ["js"], { cwd: hostile, encoding: "utf8", input: 
 check("a repo's .env can only provide provider keys, not tokens or Stem settings", leaked === "[][][abc]", leaked
 );
 
-const local = mkdtempSync(join(tmpdir(), "stem-local-rules-"));
+const local = made(mkdtempSync(join(tmpdir(), "stem-local-rules-")));
 spawnSync("git", ["init", "-q"], { cwd: local });
 spawnSync("mkdir", ["-p", join(local, ".stem")]);
 writeFileSync(join(local, ".stem", ".gitignore"), "*\n");
@@ -441,4 +443,5 @@ check(
 const failed = checks.filter(([, ok]) => !ok);
 for (const [name, ok, seen] of checks) console.log(`${ok ? "ok  " : "FAIL"} ${name}${seen ? " " + JSON.stringify(seen).slice(0, 400) : ""}`);
 console.log(`${checks.length - failed.length}/${checks.length} passed`);
+for (const path of temporary) rmSync(path, { recursive: true, force: true });
 process.exit(failed.length ? 1 : 0);
