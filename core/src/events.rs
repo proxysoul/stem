@@ -13,23 +13,14 @@ pub fn now_ms() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
-pub fn ensure_ignored(stem_dir: &Path) {
-    let ignore = stem_dir.join(".gitignore");
-    if !ignore.exists() && std::fs::create_dir_all(stem_dir).is_ok() {
-        let _ = std::fs::write(&ignore, "*\n");
-    }
-}
-
 pub fn sessions_dir(root: &Path) -> PathBuf {
-    root.join(".stem").join("sessions")
+    crate::env::project_home(root).join("sessions")
 }
 
 impl Log {
     pub fn open(root: &Path) -> Log {
-        let stem_dir = root.join(".stem");
         let dir = sessions_dir(root);
         let _ = std::fs::create_dir_all(&dir);
-        ensure_ignored(&stem_dir);
         let path = dir.join(format!("{}.jsonl", now_ms()));
         let file = OpenOptions::new().create(true).append(true).open(&path).ok();
         Log { file, path }

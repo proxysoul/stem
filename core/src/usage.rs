@@ -86,7 +86,7 @@ pub struct Turn<'a> {
 }
 
 fn path(root: &Path) -> PathBuf {
-    root.join(".stem").join("learn").join("usage.jsonl")
+    crate::env::project_home(root).join("learn").join("usage.jsonl")
 }
 
 fn now_ms() -> u64 {

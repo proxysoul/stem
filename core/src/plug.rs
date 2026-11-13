@@ -125,7 +125,6 @@ impl Server {
                 if prompt.is_empty() {
                     return Ok(json!({"note": null, "kinds": [], "skipped": "empty prompt"}));
                 }
-                crate::events::ensure_ignored(&self.root.join(".stem"));
                 if origin(params) != ORIGIN_USER {
                     let continues = origin(params) == ORIGIN_ENGINE && continue_task(&self.root, &session, self.reports_edits, params["task"].as_str());
                     if continues {

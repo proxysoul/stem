@@ -17,8 +17,7 @@ pub struct Graft {
 pub static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 pub fn dirs() -> Vec<PathBuf> {
-    let root = ROOT.get().cloned().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."));
-    vec![crate::env::stem_home().join("grafts"), root.join(".stem").join("grafts")]
+    vec![crate::env::stem_home().join("grafts")]
 }
 
 pub fn load() -> (Vec<Graft>, Vec<String>) {

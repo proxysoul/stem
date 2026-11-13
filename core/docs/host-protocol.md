@@ -1,6 +1,6 @@
 # Stem Host protocol
 
-`stem host` lets an agent app use Stem's learning natively: notes before each request, rules for each tool call, test knowledge from each result, and learning when the turn ends. The app keeps its own model loop, sandbox, code index and UI. Stem keeps everything it learns in `.stem/learn/` in the project, the same store the CLI, hooks and MCP server use.
+`stem host` lets an agent app use Stem's learning natively: notes before each request, rules for each tool call, test knowledge from each result, and learning when the turn ends. The app keeps its own model loop, sandbox, code index and UI. Stem keeps everything it learns on the machine, in `~/.stem/projects/<project>-<id>/` (`status` returns it as `store`), the same store the CLI, hooks and MCP server use. Nothing is written into the project.
 
 Other agents can use MCP and hooks (`stem integrate`). This protocol is the deeper path: it sees every tool result, not only the final diff, and it asks the app's own models for decisions.
 
@@ -72,6 +72,7 @@ Before a tool call runs. Apply what comes back.
 
 - `action`: `run` (unchanged), `redirect` (run `call` with `args` instead), or `deny` (do not run it, and show the model `reason`).
 - Rules come from `.stem/rules.json` in the project, `~/.stem/rules.json`, then Stem's built-ins, in that order. They are re-read on every call.
+- A project's own rules can only `deny` a call. Redirects and rewrites belong in `~/.stem/rules.json`, so a cloned repo can block a call but never change one.
 - `note` can also come with `run`. Show it to the model with the tool's result. These notes are tied to the file being opened, not to the wording of the request, and each comes once per turn:
   - `read` or `edit` of a file where an earlier fix has been undone: the fix, and the request it was for.
   - `edit` or `write` of a file that has feedback on an earlier fix: that feedback.

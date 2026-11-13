@@ -6,12 +6,28 @@ pub fn stem_home() -> PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".stem"))
 }
 
+const PROJECT_HOME_ID: usize = 12;
+const PROVIDER_KEY_ENDING: &str = "_API_KEY";
+const NEVER_FROM_A_PROJECT: &[&str] = &["STEM_", "GIT_", "LD_", "DYLD_"];
+
+pub fn project_home(root: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let id: String = Sha256::digest(real.to_string_lossy().as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    let name: String = real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(40).collect();
+    stem_home().join("projects").join(format!("{name}-{}", &id[..PROJECT_HOME_ID]))
+}
+
+fn provider_key(key: &str) -> bool {
+    key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') && !NEVER_FROM_A_PROJECT.iter().any(|p| key.starts_with(p)) && key.ends_with(PROVIDER_KEY_ENDING)
+}
+
 pub fn load_dotenv(project: &Path) -> Vec<PathBuf> {
     let mut loaded = Vec::new();
-    for file in [project.join(".env"), stem_home().join(".env")] {
+    for (file, from_project) in [(stem_home().join(".env"), false), (project.join(".env"), true)] {
         let Ok(text) = std::fs::read_to_string(&file) else { continue };
         for (key, value) in parse(&text) {
-            if std::env::var_os(&key).is_none() {
+            if (!from_project || provider_key(&key)) && std::env::var_os(&key).is_none() {
                 unsafe { std::env::set_var(key, value) };
             }
         }

@@ -22,7 +22,7 @@ fn now() -> u64 {
 
 fn pending_path(root: &Path, session: &str) -> PathBuf {
     let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(80).collect();
-    root.join(".stem").join("learn").join("pending").join(format!("{}.json", if name.is_empty() { "default".into() } else { name }))
+    crate::env::project_home(root).join("learn").join("pending").join(format!("{}.json", if name.is_empty() { "default".into() } else { name }))
 }
 
 fn untracked(root: &Path) -> Vec<String> {
@@ -249,7 +249,7 @@ pub fn begin_with(root: &Path, session: &str, prompt: &str, options: Begin) -> S
         }
         end(root, session, "", false);
     }
-    if let Ok(entries) = std::fs::read_dir(root.join(".stem").join("learn").join("pending")) {
+    if let Ok(entries) = std::fs::read_dir(crate::env::project_home(root).join("learn").join("pending")) {
         for entry in entries.flatten() {
             let old = entry.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 24 * 3600);
             if old {
@@ -257,7 +257,6 @@ pub fn begin_with(root: &Path, session: &str, prompt: &str, options: Begin) -> S
             }
         }
     }
-    crate::events::ensure_ignored(&root.join(".stem"));
     let mut learn = Learn::open(root);
     learn.host = true;
     learn.decide = options.decide;
@@ -283,7 +282,7 @@ pub fn begin_with(root: &Path, session: &str, prompt: &str, options: Begin) -> S
 
 fn log(root: &Path, line: &str) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(root.join(".stem").join("hooks.log")) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::env::project_home(root).join("hooks.log")) {
         let _ = writeln!(f, "{} {line}", now());
     }
 }

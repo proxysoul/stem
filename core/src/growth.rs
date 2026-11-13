@@ -87,10 +87,10 @@ pub fn effects_of(code: &str) -> Vec<String> {
 
 impl Growth {
     pub fn open(root: &Path) -> Growth {
-        let dir = root.join(".stem").join("tools");
+        let dir = crate::env::project_home(root).join("tools");
         let enabled = std::env::var("STEM_TOOLS").map(|v| v != "off" && v != "0").unwrap_or(true);
         let mut tools: Vec<Tool> = Vec::new();
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten().filter(|_| enabled) {
             if entry.path().extension().is_some_and(|e| e == "json") && entry.file_name() != "explored.json" && entry.file_name() != "shapes.json" {
                 if let Some(t) = std::fs::read_to_string(entry.path()).ok().and_then(|t| serde_json::from_str::<Tool>(&t).ok()) {
                     tools.push(t);

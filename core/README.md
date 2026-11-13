@@ -13,7 +13,7 @@ echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.stem/.env && chmod 600 ~/.stem/.env
 cd any/project && stem             # the input; or: stem "fix the failing test"
 ```
 
-Keys are read from the shell, then the project's `.env`, then `~/.stem/.env`. Any provider listed on models.dev works if its key variable is set (its name comes from models.dev, for example `OPENROUTER_API_KEY`, `LLMGATEWAY_API_KEY`; `LLMGW_KEY` is accepted for LLM Gateway). `STEM_API_KEY` overrides all of them.
+Keys are read from the shell, then `~/.stem/.env`, then the project's `.env`. From a project's `.env` Stem takes only `*_API_KEY` variables, so a repo cannot change Stem's settings or hand the commands Stem runs another token. Any provider listed on models.dev works if its key variable is set (its name comes from models.dev, for example `OPENROUTER_API_KEY`, `LLMGATEWAY_API_KEY`; `LLMGW_KEY` is accepted for LLM Gateway). `STEM_API_KEY` overrides all of them.
 
 No key? `stem login claude-native` (alias `claude-n`, or `/login claude-native` in the input) signs in to your Claude Pro/Max plan in the browser with no Claude Code needed, over OAuth (callback on `localhost:54545`, or paste the code or redirect URL when the browser cannot reach this machine). The tokens go to `~/.stem/auth/claude.json` (mode 600) and refresh on their own; requests go straight to the Anthropic Messages API with Claude Code's OAuth headers, so native tools, thinking, effort and prompt caching all work. Models are `claude-native/<anthropic model id>`, prices show $0.
 
@@ -27,7 +27,7 @@ No key? `stem login claude-native` (alias `claude-n`, or `/login claude-native` 
 | `stem "task"` | runs one task, prints the final answer on stdout, the cost line on stderr. Piped stdin works too |
 | `stem models [filter]` | models you can use now (● = key set), live from models.dev |
 | `stem learn` | between sessions: runs the project's candidate test commands on a clean checkout next to recently changed code, keeps the one that passes and records failures that exist before any change. `stem learn feedback <text>` stores what was wrong with the last fix; `stem learn <request>` shows the start note |
-| `stem grafts` | your own providers and agents from `~/.stem/grafts` and `.stem/grafts`, with key status and skipped files |
+| `stem grafts` | your own providers and agents from `~/.stem/grafts`, with key status and skipped files |
 | `stem doctor` | which model, key, API, project commands and language servers Stem picks, and how long each server takes to be ready |
 | `stem stats` | cost, tokens, scripts and `$` calls from this project's event logs |
 | `stem js [file]` | runs one script against `$` with no model (stdin if no file) |
@@ -69,11 +69,15 @@ History is append-only: Stem never rewrites an earlier message, so every turn re
 
 ## Code facts (`$.sql`)
 
-A SQLite store in `.stem/facts.db`, filled by tree-sitter (TypeScript, JavaScript, Rust, Python, Go) and git. It stays current on every query: only files whose size or time changed are parsed again. Tables: `files`, `symbols` (definitions), `refs` (calls and type uses by name), `commits`, `commit_files`, `cochange` (files changed together). On an 8,079-file TypeScript repo (1.06M lines) the first index takes 3.9 s and holds 84k symbols, 714k references and 3,000 commits; later queries take under a millisecond plus a quick change check. `$.sql` only reads.
+A SQLite store, `facts.db` in the project's Stem folder, filled by tree-sitter (TypeScript, JavaScript, Rust, Python, Go) and git. It stays current on every query: only files whose size or time changed are parsed again. Tables: `files`, `symbols` (definitions), `refs` (calls and type uses by name), `commits`, `commit_files`, `cochange` (files changed together). On an 8,079-file TypeScript repo (1.06M lines) the first index takes 3.9 s and holds 84k symbols, 714k references and 3,000 commits; later queries take under a millisecond plus a quick change check. `$.sql` only reads.
 
-## Learning (`.stem/learn`)
+## Where Stem keeps things
 
-Stem learns from its own finished work in this project, with nothing written by hand. Everything lives in `.stem/learn/state.json`, and it reaches the model once, as a short note at the start of a request; nothing is added in the middle of a task.
+Everything Stem keeps about a project lives on your machine in `~/.stem/projects/<project>-<id>/`: what it learned, saved tools, the fact store, session logs. Nothing is written into the project, and nothing a repo ships is loaded except a `.stem/rules.json` that can only block calls. A cloned repo cannot hand Stem notes, tools, providers or settings. `status` (with `stem host`) shows the folder.
+
+## Learning
+
+Stem learns from its own finished work in this project, with nothing written by hand. Everything lives in `learn/state.json` in the project's Stem folder, and it reaches the model once, as a short note at the start of a request; nothing is added in the middle of a task.
 
 - **Resume.** A session that stops without an answer stores its request, edits, scratch scripts and last result. A later request with the same words gets them back with the earlier request quoted, and each edit marked as still in the files, undone, or changed since.
 - **Regressions.** Every string edit a finished task kept is stored as before/after. When every edit of one earlier fix is undone in its file and the new request shares words with that fix's request, the start note shows the fix and asks to re-apply it. Fixes that got negative feedback are dropped.
@@ -115,6 +119,7 @@ Every `$` call can pass through your own rules first: `.stem/rules.json` in the 
   - `allow` stops later rules.
 - A rewritten or redirected call adds a `[stem]` line to the script's log.
 - A project's own rules cannot `allow`: a cloned repo must not be able to loosen anything. Allow rules live only in `~/.stem/rules.json`.
+- A project's own rules can only `deny`. Redirects and rewrites need `~/.stem/rules.json`.
 - The built-in checks (destructive steps, scratch-only deletes) still run after the rules.
 - Bad rules are reported when Stem starts and skipped.
 
@@ -155,7 +160,7 @@ Nothing about models is built in. On first use Stem fetches `https://models.dev/
 
 ## Grafts: your own providers and agents
 
-A graft is one JSON file in `~/.stem/grafts/` (yours) or `.stem/grafts/` (this project's; it wins on the same name). The file name is the provider id, so `.stem/grafts/gw.json` gives `stem -m gw/<model>`. `stem grafts` lists them, which key each needs, and why a file was skipped.
+A graft is one JSON file in `~/.stem/grafts/`. Grafts a project ships are not loaded, so a repo cannot point Stem's model calls, and your keys, somewhere else. The file name is the provider id, so `~/.stem/grafts/gw.json` gives `stem -m gw/<model>`. `stem grafts` lists them, which key each needs, and why a file was skipped.
 
 ```json
 { "protocol": "responses", "api": "https://api.llmgateway.io/v1", "env": ["LLMGW_KEY"], "models": ["gpt-5-mini"] }
@@ -179,7 +184,7 @@ A graft is one JSON file in `~/.stem/grafts/` (yours) or `.stem/grafts/` (this p
 | `host.rs` | every `$` function |
 | `lsp.rs`, `servers.rs` | language server client; finds or downloads tsgo, ty and rust-analyzer, uses gopls, clangd, lua-language-server, zls when installed |
 | `project.rs` | runner and commands from lockfiles and manifests, npm/npx rewritten to the project's runner |
-| `events.rs` | `.stem/sessions/<time>.jsonl` in the project (the folder ignores itself in git) |
+| `events.rs` | `sessions/<time>.jsonl` in the project's Stem folder |
 | `ui.rs` | the growing cell shown while Stem works |
 
 ## While it works

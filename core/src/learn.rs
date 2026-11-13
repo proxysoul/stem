@@ -112,6 +112,8 @@ pub struct Fix {
     pub before: String,
     pub after: String,
     pub request: String,
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -387,7 +389,7 @@ fn terms(text: &str) -> Vec<String> {
 
 impl Learn {
     pub fn open(root: &Path) -> Learn {
-        let dir = root.join(".stem").join("learn");
+        let dir = crate::env::project_home(root).join("learn");
         let enabled = std::env::var("STEM_LEARN").map(|v| v != "off" && v != "0").unwrap_or(true);
         let state: State = if enabled { std::fs::read_to_string(dir.join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default() } else { State::default() };
         Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new(), acted: false, noted_resume: Vec::new(), checks_before: Vec::new() }
@@ -417,7 +419,6 @@ impl Learn {
             return;
         }
         let _ = std::fs::create_dir_all(&self.dir);
-        crate::events::ensure_ignored(&self.root.join(".stem"));
         if let Ok(t) = serde_json::to_string_pretty(&self.state) {
             let tmp = self.dir.join(format!("state.json.{}", std::process::id()));
             if std::fs::write(&tmp, t).is_ok() && std::fs::rename(&tmp, self.dir.join("state.json")).is_err() {
@@ -691,7 +692,7 @@ impl Learn {
             }).collect()
         };
         let fixes: Vec<Fix> = old["fixes"].as_array().into_iter().flatten().filter_map(|f| {
-            let fix = Fix { file: f["file"].as_str()?.to_string(), before: f["before"].as_str()?.to_string(), after: f["after"].as_str()?.to_string(), request: f["request"].as_str()?.chars().take(160).collect() };
+            let fix = Fix { file: f["file"].as_str()?.to_string(), before: f["before"].as_str()?.to_string(), after: f["after"].as_str()?.to_string(), request: f["request"].as_str()?.chars().take(160).collect(), session: None };
             let now = std::fs::read_to_string(self.root.join(&fix.file)).unwrap_or_default();
             (learnable(&fix.file) && fix_target(&fix.file) && !fix.before.trim().is_empty() && substantive(&fix.request) && edit_state(&now, &fix.before, &fix.after) == EditState::Present).then_some(fix)
         }).collect();
@@ -768,6 +769,7 @@ impl Learn {
             "familiarWords": self.state.trails.len(),
             "testCommand": self.state.test_command,
             "resume": self.state.resume.is_some(),
+            "store": self.dir.parent().map(|p| p.display().to_string()),
             "habits": crate::habits::summary(&self.state.habits),
         })
     }
@@ -1384,11 +1386,19 @@ impl Learn {
                 *self.state.tested.entry(t.clone()).or_default() += 1;
             }
             if on("regress") {
+                if let Some(session) = self.session.as_ref().filter(|s| s.as_str() != "default" && !s.starts_with("mcp-")) {
+                    let edits = &self.edits;
+                    self.state.fixes.retain(|f| {
+                        let own = f.session.as_ref() == Some(session);
+                        let undid = edits.iter().any(|(file, before, _)| *file == f.file && !f.after.trim().is_empty() && before.contains(f.after.as_str()));
+                        !(own && undid)
+                    });
+                }
                 for (file, before, after) in self.edits.iter().filter(|(f, before, _)| learnable(f) && fix_target(f) && !before.trim().is_empty()).take(FIXES_PER_TASK) {
                     let now = std::fs::read_to_string(self.root.join(file)).unwrap_or_default();
                     if edit_state(&now, before, after) == EditState::Present {
                         self.state.fixes.retain(|f| !(f.file == *file && f.before == *before));
-                        self.state.fixes.push(Fix { file: file.clone(), before: before.clone(), after: after.clone(), request: prompt.chars().take(160).collect() });
+                        self.state.fixes.push(Fix { file: file.clone(), before: before.clone(), after: after.clone(), request: prompt.chars().take(160).collect(), session: self.session.clone() });
                     }
                 }
                 let mut kept: BTreeMap<String, usize> = BTreeMap::new();

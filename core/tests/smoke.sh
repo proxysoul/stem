@@ -4,10 +4,12 @@ STEM=${STEM:-stem}
 HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
+export STEM_HOME="$T/home"
+mkdir "$T/repo"
 pass() { printf 'ok   %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; exit 1; }
 
-cd "$T"
+cd "$T/repo"
 git init -q
 git config user.email smoke@stem
 git config user.name smoke
@@ -38,8 +40,9 @@ echo "$out" | grep -q '"code":-32022' && pass "mcp rejects unknown protocol vers
 echo '{"session_id":"s1","prompt":"add() subtracts instead of adding; fix it"}' | "$STEM" hook prompt >/dev/null
 printf 'export function add(a: number, b: number): number {\n  return a + b\n}\n' > src/math.ts
 echo '{"session_id":"s1","last_assistant_message":"Fixed src/math.ts"}' | "$STEM" hook stop
-grep -q '"return a + b' .stem/learn/state.json 2>/dev/null || grep -q 'return a + b' .stem/learn/state.json && pass "hook stop learns the fix from the git diff" || fail "hook stop"
-[ "$(git status --porcelain --ignored .stem | head -1)" = "!! .stem/" ] && pass ".stem stays out of git" || fail ".stem is not ignored"
+state=$(find "$STEM_HOME/projects" -path '*/learn/state.json' | head -1)
+grep -q 'return a + b' "$state" && pass "hook stop learns the fix from the git diff" || fail "hook stop"
+[ ! -e .stem ] && [ -z "$(git status --porcelain --ignored | grep -v '^ M src/math.ts$')" ] && pass "nothing is written into the project" || fail "Stem wrote into the project: $(git status --porcelain --ignored)"
 
 git commit -qam fix
 printf 'export function add(a: number, b: number): number {\n  return a - b\n}\n' > src/math.ts

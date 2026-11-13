@@ -269,7 +269,7 @@ impl Session {
 
     fn offload_dir(&self) -> std::path::PathBuf {
         let session = self.engine.log.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        self.engine.host.borrow().root.join(".stem").join("offload").join(session)
+        crate::env::project_home(&self.engine.host.borrow().root).join("offload").join(session)
     }
 
     fn publish_context(&self) {

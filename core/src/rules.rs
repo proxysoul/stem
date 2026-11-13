@@ -131,11 +131,18 @@ fn built_in() -> Vec<Rule> {
     .collect()
 }
 
+const DENY_REASON_CHARS: usize = 200;
+const DENY_NAME_CHARS: usize = 60;
+
+fn project_may(rule: &RawRule) -> bool {
+    rule.action == "deny"
+}
+
 impl Rules {
     pub fn load(root: &Path) -> Rules {
         let mut rules = Vec::new();
         let mut problems = Vec::new();
-        let sources: [(Option<std::path::PathBuf>, &'static str); 2] = [(Some(root.join(".stem").join("rules.json")), "project"), (dirs::home_dir().map(|h| h.join(".stem").join("rules.json")), "user")];
+        let sources: [(Option<std::path::PathBuf>, &'static str); 2] = [(Some(root.join(".stem").join("rules.json")), "project"), (Some(crate::env::stem_home().join("rules.json")), "user")];
         for (path, source) in sources {
             let Some(path) = path else { continue };
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
@@ -153,6 +160,10 @@ impl Rules {
                 }
                 if source == "project" && r.action == "allow" {
                     problems.push(format!("{}: rule {} ignored: a project's own rules cannot allow; put allow rules in ~/.stem/rules.json", path.display(), r.name));
+                    continue;
+                }
+                if source == "project" && !project_may(&r) {
+                    problems.push(format!("{}: rule {} ignored: a project's own rules can only deny a call; put other rules in ~/.stem/rules.json", path.display(), r.name));
                     continue;
                 }
                 if (r.action == "rewrite" && r.rewrite.is_none()) || (r.action == "redirect" && r.redirect.is_none()) {
@@ -197,7 +208,12 @@ impl Rules {
             let hit = json!({"rule": rule.raw.name, "source": rule.source, "call": call, "action": rule.raw.action});
             let note = rule.raw.note.clone();
             let outcome = match rule.raw.action.as_str() {
-                "deny" => Outcome::Deny(format!("refused by rule {}: {}", rule.raw.name, rule.raw.reason.clone().unwrap_or_else(|| "not allowed here".into()))),
+                "deny" => {
+                    let reason: String = rule.raw.reason.clone().unwrap_or_else(|| "not allowed here".into()).chars().take(DENY_REASON_CHARS).collect();
+                    let whose = if rule.source == "project" { "this project's rule" } else { "rule" };
+                    let name: String = rule.raw.name.chars().take(DENY_NAME_CHARS).collect();
+                    Outcome::Deny(format!("refused by {whose} {name}: {reason}"))
+                }
                 "rewrite" => {
                     let rw = rule.raw.rewrite.as_ref().expect("checked at load");
                     let mut next = args.clone();

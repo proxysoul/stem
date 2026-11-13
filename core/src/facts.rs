@@ -98,7 +98,7 @@ fn parse(path: &Path, rel: String, grammar: &'static str, configs: &[(Lang, &'st
 
 impl Facts {
     pub fn open(root: &Path) -> Result<Facts, String> {
-        let dir = root.join(".stem");
+        let dir = crate::env::project_home(root);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let db = Connection::open(dir.join("facts.db")).map_err(|e| format!("fact store: {e}"))?;
         db.execute_batch("pragma journal_mode = wal; pragma synchronous = normal;").map_err(|e| e.to_string())?;

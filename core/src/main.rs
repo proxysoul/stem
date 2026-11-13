@@ -59,7 +59,7 @@ const HELP: &str = "stem: a tiny coding engine that grows with your project
   stem learn <request>      show what Stem would tell the model at the start of that request
   stem learn feedback <text>  tell Stem what was wrong with its last fix; it brings this up when that code or request comes back
   stem learn                between sessions: check how this project's tests run on a clean checkout and remember it
-  stem grafts               your own providers and agents, plugged in from ~/.stem/grafts or .stem/grafts
+  stem grafts               your own providers and agents, plugged in from ~/.stem/grafts
   stem stats                cost, tokens, cache and scripts for this project
   stem doctor               show the model, key, project and language servers Stem picks
   stem tools                functions this project grew: uses, failures, age, and the dropped ones with why
