@@ -1386,14 +1386,11 @@ impl Learn {
                 *self.state.tested.entry(t.clone()).or_default() += 1;
             }
             if on("regress") {
-                if let Some(session) = self.session.as_ref().filter(|s| s.as_str() != "default" && !s.starts_with("mcp-")) {
-                    let edits = &self.edits;
-                    self.state.fixes.retain(|f| {
-                        let own = f.session.as_ref() == Some(session);
-                        let undid = edits.iter().any(|(file, before, _)| *file == f.file && !f.after.trim().is_empty() && before.contains(f.after.as_str()));
-                        !(own && undid)
-                    });
-                }
+                let edits = &self.edits;
+                self.state.fixes.retain(|f| {
+                    let replaced = edits.iter().any(|(file, before, after)| *file == f.file && !f.after.trim().is_empty() && before.contains(f.after.as_str()) && !after.contains(f.after.as_str()));
+                    !replaced
+                });
                 for (file, before, after) in self.edits.iter().filter(|(f, before, _)| learnable(f) && fix_target(f) && !before.trim().is_empty()).take(FIXES_PER_TASK) {
                     let now = std::fs::read_to_string(self.root.join(file)).unwrap_or_default();
                     if edit_state(&now, before, after) == EditState::Present {

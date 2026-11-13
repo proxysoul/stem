@@ -97,6 +97,7 @@ pub struct Reported {
     pub kinds: Vec<String>,
     pub withheld: Vec<String>,
     pub acted: bool,
+    pub rule_hits: usize,
     pub offered_checks: Vec<String>,
     pub noted_regress: Vec<(String, String, String)>,
     pub shown: Option<bool>,
@@ -154,7 +155,7 @@ fn fix_triples(list: &Value) -> Vec<(String, String, String)> {
 pub fn usage_only(root: &Path, session: &str, origin: &str, finished: bool, shown: bool, usage: &Value) -> bool {
     let mut learn = Learn::open(root);
     learn.session = Some(session.to_string());
-    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], withheld: &[], followed: &[], shown, finished, usage })
+    crate::usage::record(root, &crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &[], withheld: &[], followed: &[], shown, finished, usage, rule_hits: 0 })
 }
 
 pub fn end(root: &Path, session: &str, answer: &str, finished: bool) -> Value {
@@ -219,7 +220,7 @@ pub fn end_with(root: &Path, session: &str, answer: &str, finished: bool, report
     learn.acted = reported.acted || reported.origin.as_deref().is_some_and(|o| o != ORIGIN_USER);
     learn.external(prompt, answer, edits, touched, finished, reported.usage["steps"].as_u64().unwrap_or(0) as usize);
     let origin = reported.origin.as_deref().unwrap_or(ORIGIN_USER);
-    let turn = crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &kinds, withheld: &withheld, followed: &followed, shown: reported.shown.unwrap_or(true), finished, usage: &reported.usage };
+    let turn = crate::usage::Turn { session, task: learn.task_id(), origin, kinds: &kinds, withheld: &withheld, followed: &followed, shown: reported.shown.unwrap_or(true), finished, usage: &reported.usage, rule_hits: reported.rule_hits };
     summary["usageStored"] = json!(crate::usage::record(root, &turn));
     summary
 }

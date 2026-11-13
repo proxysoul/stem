@@ -87,6 +87,7 @@ pub struct Turn<'a> {
     pub shown: bool,
     pub finished: bool,
     pub usage: &'a Value,
+    pub rule_hits: usize,
 }
 
 fn path(root: &Path) -> PathBuf {
@@ -109,6 +110,7 @@ pub fn record(root: &Path, turn: &Turn) -> bool {
     row.insert("followed".into(), json!(turn.followed));
     row.insert("shown".into(), json!(turn.shown));
     row.insert("finished".into(), json!(turn.finished));
+    row.insert("ruleHits".into(), json!(turn.rule_hits));
     for field in FIELDS {
         if let Some(v) = turn.usage.get(*field).filter(|v| v.is_number() || v.is_string()) {
             row.insert((*field).into(), v.clone());
@@ -157,6 +159,7 @@ fn turn_stats(kind: &str, rows: &[&Value]) -> Value {
         "medianFreshTokens": over(&fresh_tokens),
         "medianSteps": over(&|r| r["steps"].as_f64()),
         "medianRepeatReads": over(&|r| r["repeatReads"].as_f64()),
+        "ruleHits": rows.iter().filter_map(|r| r["ruleHits"].as_u64()).sum::<u64>(),
     });
     if FOLLOWABLE.contains(&kind) {
         stats["followed"] = json!(rows.iter().filter(|r| r["followed"].as_array().is_some_and(|f| f.iter().any(|k| k.as_str() == Some(kind)))).count());

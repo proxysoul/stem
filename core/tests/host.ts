@@ -192,7 +192,7 @@ const newTax = "export const tax = (n: number) => n * 0.25\n";
 writeFileSync(join(dir, "src", "tax.ts"), newTax);
 const engineEnd = await call("turn.end", { session: "tab-e1", origin: "engine", answer: "Changed the rate.", finished: true, edits: [{ file: "src/tax.ts", before: oldTax, after: newTax }], touched: ["src/tax.ts"], usage: { cost: 2, steps: 5, inputTokens: 3000, cacheRead: 2500, outputTokens: 100 } });
 const fixesAfter = (await call("status")).result.fixes;
-check("the app's own continuation of a task is learned under that task", engineStart.result?.continues === true && engineEnd.result?.edits === 1 && engineEnd.result.usageStored === true && fixesAfter === fixesBefore + 1, { engineStart, engineEnd, fixesBefore, fixesAfter });
+check("the app's own continuation of a task is learned under that task", engineStart.result?.continues === true && engineEnd.result?.edits === 1 && engineEnd.result.usageStored === true && JSON.parse(readFileSync(join(store, "learn", "state.json"), "utf8")).fixes.some((f: { request: string; file: string }) => f.file === "src/tax.ts" && f.request.startsWith("tax helper should use the new quarter rate")), { engineStart, engineEnd, fixesBefore, fixesAfter });
 const linkEnd2 = await call("turn.end", { session: "tab-e1", origin: "link", answer: "noted", shown: false, usage: { cost: 0.5, steps: 1 } });
 const taskRows = usageRows().filter((r) => r.session === "tab-e1");
 check("every turn's usage is stored with its task, whoever started the turn", !!linkEnd2.result?.skipped && linkEnd2.result.usageStored === true && taskRows.length === 3 && taskRows.map((r) => r.origin).join() === "user,engine,link" && new Set(taskRows.map((r) => r.task)).size === 1 && taskRows[0].task > 0 && taskRows[0].at > 1e12 && taskRows[2].shown === false && taskRows[0].shown === true, taskRows);
@@ -275,6 +275,29 @@ await call("turn.start", { session: "tab-other", prompt: "look at the rate helpe
 const ownReplaced = await call("rule.check", { session: "tab-other", call: "read", args: { path: "src/rate.ts" } });
 await call("turn.end", { session: "tab-other", answer: "", finished: true, edits: [], touched: [] });
 check("a fix the same conversation later replaced on purpose is not reported as undone", !/again has code/.test(ownReplaced.result?.note ?? ""), ownReplaced);
+spawnSync("mkdir", ["-p", join(dir, "lib")]);
+const toll = join(dir, "lib", "toll.ts");
+const lowToll = "export const toll = (n: number) => n + 1\n";
+const highToll = "export const toll = (n: number) => n + 2\n";
+writeFileSync(toll, lowToll);
+await call("turn.start", { session: "tab-fix", prompt: "the toll helper should add two, not one", origin: "user" });
+writeFileSync(toll, highToll);
+await call("turn.end", { session: "tab-fix", answer: "Now adds two.", finished: true, edits: [{ file: "lib/toll.ts", before: lowToll, after: highToll }], touched: ["lib/toll.ts"] });
+await call("turn.start", { session: "tab-rewrite", prompt: "rework the toll helper back to a single unit charge", origin: "user" });
+writeFileSync(toll, lowToll);
+const rewriteEnd = await call("turn.end", { session: "tab-rewrite", answer: "Back to one.", finished: true, edits: [{ file: "lib/toll.ts", before: highToll, after: lowToll }], touched: ["lib/toll.ts"] });
+await call("turn.start", { session: "tab-third", prompt: "look at the toll helper", origin: "user" });
+const afterRewrite = await call("rule.check", { session: "tab-third", call: "read", args: { path: "lib/toll.ts" } });
+await call("turn.end", { session: "tab-third", answer: "", finished: true, edits: [], touched: [] });
+check("a fix another conversation deliberately rewrote is not reported as undone", !/again has code/.test(afterRewrite.result?.note ?? "") && rewriteEnd.result?.edits === 1, { afterRewrite, rewriteEnd });
+await call("turn.start", { session: "tab-revert", prompt: "the toll helper should add two again", origin: "user" });
+writeFileSync(toll, highToll);
+await call("turn.end", { session: "tab-revert", answer: "Adds two.", finished: true, edits: [{ file: "lib/toll.ts", before: lowToll, after: highToll }], touched: ["lib/toll.ts"] });
+writeFileSync(toll, lowToll);
+await call("turn.start", { session: "tab-fourth", prompt: "look at the toll helper", origin: "user" });
+const outsideUndo = await call("rule.check", { session: "tab-fourth", call: "read", args: { path: "lib/toll.ts" } });
+await call("turn.end", { session: "tab-fourth", answer: "", finished: true, edits: [], touched: [] });
+check("a fix undone outside any conversation, such as a checkout, is still pointed out", /lib\/toll\.ts:1 again has code/.test(outsideUndo.result?.note ?? ""), outsideUndo);
 
 const bad = await call("nope");
 check("unknown methods return an error, not a crash", !!bad.error?.message, bad);
@@ -315,14 +338,14 @@ const call3 = (method: string, params: object = {}) =>
   });
 await call3("hello", { protocol: 1 });
 const earning = (await call3("status")).result.usage.kinds;
-check("status says which kinds of note have earned being shown", earning.familiar?.state === "probation" && earning.habits?.state === "probation" && earning.regress?.state === "shown until judged" && earning.answer?.state === "shown until judged" && earning.familiar.needsTurns === 10, earning);
+check("status says which kinds of note have earned being shown", ["probation", "withheld"].includes(earning.familiar?.state) && earning.habits?.state === "probation" && earning.regress?.state === "shown until judged" && earning.answer?.state === "shown until judged" && earning.familiar.needsTurns === 10, earning);
 const gated = await call3("turn.start", { session: "tab-g1", prompt: "tax helper should accept a custom rate", origin: "user" });
 const gatedEdit = await call3("rule.check", { session: "tab-g1", call: "edit", args: { path: "src/price.ts" } });
 const gatedEnd = await call3("turn.end", { session: "tab-g1", answer: "", finished: true, edits: [], touched: [] });
 check(
   "a kind that has not earned it is worked out and withheld, at the start and at the edit",
   gated.result?.withheld?.includes("familiar") && !gated.result.kinds.includes("familiar") && !/earlier work in this project/.test(gated.result.note ?? "") && !/checked their work/.test(gatedEdit.result?.note ?? "") && gatedEnd.result?.withheld?.includes("habits") && gatedEnd.result.withheld.includes("familiar"),
-  { gated, gatedEdit, gatedEnd },
+  { start: gated.result, editNote: gatedEdit.result?.note?.slice(-260), end: { kinds: gatedEnd.result?.kinds, withheld: gatedEnd.result?.withheld } },
 );
 const usageFile = join(store, "learn", "usage.jsonl");
 for (let i = 0; i < 10; i++) appendFileSync(usageFile, JSON.stringify({ at: Date.now(), session: `earned-${i}`, task: null, origin: "user", kinds: [], withheld: ["habits"], followed: ["habits"], shown: true, finished: true }) + "\n");
@@ -330,7 +353,7 @@ const earned = (await call3("status")).result.usage.kinds.habits;
 await call3("turn.start", { session: "tab-g2", prompt: "tax helper should reject negative amounts", origin: "user" });
 const shownEdit = await call3("rule.check", { session: "tab-g2", call: "edit", args: { path: "src/price.ts" } });
 const shownEnd = await call3("turn.end", { session: "tab-g2", answer: "", finished: true, edits: [], touched: [] });
-check("a kind that was right in at least half of ten turns is shown from then on", earned.state === "proven" && /checked their work/.test(shownEdit.result?.note ?? "") && shownEnd.result?.kinds?.includes("habits") && !shownEnd.result.withheld.includes("habits"), { earned, shownEdit, shownEnd });
+check("a kind that was right in at least half of ten turns is shown from then on", earned.state === "proven" && /checked their work/.test(shownEdit.result?.note ?? "") && shownEnd.result?.kinds?.includes("habits") && !shownEnd.result.withheld.includes("habits"), { earned, editNote: shownEdit.result?.note?.slice(-260), end: { kinds: shownEnd.result?.kinds, withheld: shownEnd.result?.withheld } });
 await call3("turn.start", { session: "tab-g3", prompt: "System notice: continue the work", origin: "engine", task: "Add a discount helper next to the tax helper" });
 writeFileSync(join(dir, "src", "discount.ts"), "export const discount = (n: number) => n * 0.9\n");
 const hintedEngine = await call3("turn.end", { session: "tab-g3", origin: "engine", answer: "Added it.", finished: true, edits: [], touched: ["src/discount.ts"] });

@@ -63,6 +63,7 @@ struct Seen {
     offered: Vec<String>,
     undone_told: HashSet<String>,
     noted_regress: Vec<(String, String, String)>,
+    rule_hits: usize,
 }
 
 impl Seen {
@@ -187,6 +188,11 @@ impl Server {
             "rule.check" => {
                 let call = params["call"].as_str().ok_or("missing call")?;
                 let (outcome, rule) = Rules::load(&self.root).apply(call, &params["args"]);
+                if rule.is_some() {
+                    if let Some(seen) = params["session"].as_str().and_then(|s| self.seen.get_mut(s)) {
+                        seen.rule_hits += 1;
+                    }
+                }
                 let mut learned: Vec<String> = Vec::new();
                 let show_all = self.show_all;
                 if let (Outcome::Run { name, args, .. }, Some(seen)) = (&outcome, params["session"].as_str().and_then(|s| self.seen.get_mut(s))) {
@@ -252,6 +258,7 @@ impl Server {
                     kinds: seen.kinds,
                     withheld: seen.withheld,
                     acted: seen.acted,
+                    rule_hits: seen.rule_hits,
                     offered_checks: seen.offered,
                     noted_regress: seen.noted_regress,
                     shown: params["shown"].as_bool(),

@@ -146,6 +146,7 @@ What Stem knows about this project, for a panel or a status chip.
 - `usage.notShown`: turns where Stem had a note of that kind and it was not shown, by the app (`shown: false`) or by Stem (`withheld`). Same kind of turn, no note: the fair side to compare `byNote` with.
 - `usage.kinds`: the record of each kind that has to earn being shown. `state` is `probation` (withheld, fewer than `needsTurns`), `withheld` (judged, right less often than `needsRate`), `shown until judged`, or `proven`.
 - `usage.tasks.unassigned`: turns that belong to no task, such as messages into a conversation where the user never asked anything.
+- `ruleHits`: how many calls a rule redirected or blocked in those turns.
 - `medianTokens` is input plus output. `medianFreshTokens` leaves cache reads out: input minus `cacheRead`, plus output. Medians of an even count are the mean of the two middle values. `followed` is a count of turns.
 - `usage.tasks`: the same split per task. A task is one request in one session with every turn that followed it, the app's own continuations included; its cost is the sum of its turns.
 - Costs are list prices (see `turn.end`), so read them as size, not as a bill.
