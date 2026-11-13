@@ -52,7 +52,7 @@ function caretMove(x: number, y: number, n: number, charW: number, from: number,
   KEYFRAMES.push(`@keyframes ${name}{0%,${pct(from, total)}{transform:translateX(0)}${pct(until, total)},${pct(hold, total)}{transform:translateX(${f(n * charW)}px)}100%{transform:translateX(0)}}`);
   return `<g style="animation:${name} ${total}s steps(${n},end) infinite"><text x="${x}" y="${y}" ${attrs} class="caret">▍</text></g>`;
 }
-const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 async function frame(sheet: "directions" | "reactions", cell: number, size: number): Promise<string> {
   const atlas = join(here, `kit/mascot/sprout-${sheet}.webp`);
