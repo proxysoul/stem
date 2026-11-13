@@ -18,10 +18,10 @@ getrandom = "0.4.3"
 globset = "0.4.21"
 ignore = "0.4.34"
 nu-ansi-term = "0.50.3"
-reedline = "0.52.1"
+reedline = "0.53.0"
 regex = "1.13.1"
 rquickjs = { version = "0.14.0", features = ["macro", "array-buffer", "classes", "properties"] }
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11"

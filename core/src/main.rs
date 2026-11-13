@@ -735,7 +735,7 @@ fn repl(mut session: Session, root: &std::path::Path, presses: Arc<AtomicU64>, y
                 println!();
             }
             Ok(Signal::CtrlD) => break,
-            Ok(Signal::CtrlC) => continue,
+            Ok(Signal::CtrlC(_)) => continue,
             Ok(_) => continue,
             Err(e) => return fail(&format!("input: {e}")),
         }
