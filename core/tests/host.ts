@@ -153,7 +153,7 @@ check("the usual checks are offered once per area per turn", !!once.result?.note
 await call("turn.end", { session: "tab-h4", answer: "", finished: true, edits: [], touched: [] });
 
 const followUp = await call("turn.start", { session: "tab-h3", prompt: "continue", origin: "user" });
-check("a follow-up gets the task so far: request, files changed, last result", /continues the task: tax helper should accept a custom rate/.test(followUp.result?.note ?? "") && /src\/tax\.ts/.test(followUp.result.note) && followUp.result.kinds.includes("trail"), followUp);
+check("a follow-up gets the task so far: request, files changed, last result", /continues the task: tax helper should accept a custom rate/.test(followUp.result?.note ?? "") && /src\/tax\.ts/.test(followUp.result.note) && /Last turn ended with: done/.test(followUp.result.note) && followUp.result.kinds.includes("trail"), followUp);
 await call("turn.end", { session: "tab-h3", answer: "", finished: true, edits: [], touched: [], usage: { cost: 0.1, inputTokens: 100, outputTokens: 10, steps: 1 } });
 const otherTab = await call("turn.start", { session: "tab-h9", prompt: "continue", origin: "user" });
 check("another tab's follow-up does not get this tab's task", !/continues the task/.test(otherTab.result?.note ?? ""), otherTab);
@@ -338,8 +338,10 @@ const call3 = (method: string, params: object = {}) =>
   });
 await call3("hello", { protocol: 1 });
 const earning = (await call3("status")).result.usage.kinds;
+check("status reports the task trail and how well expected steps match", earning.trail?.state === "always shown" && typeof (await call3("status")).result.usage.expectedSteps?.turns === "number", earning.trail);
 check("status says which kinds of note have earned being shown", ["probation", "withheld"].includes(earning.familiar?.state) && earning.habits?.state === "probation" && earning.regress?.state === "shown until judged" && earning.answer?.state === "shown until judged" && earning.familiar.needsTurns === 10, earning);
 const gated = await call3("turn.start", { session: "tab-g1", prompt: "tax helper should accept a custom rate", origin: "user" });
+check("a familiar task comes with how many steps similar work took, even while the note itself is withheld", typeof gated.result?.familiarity?.expectedSteps === "number" && gated.result.familiarity.expectedSteps > 0, gated.result?.familiarity);
 const gatedEdit = await call3("rule.check", { session: "tab-g1", call: "edit", args: { path: "src/price.ts" } });
 const gatedEnd = await call3("turn.end", { session: "tab-g1", answer: "", finished: true, edits: [], touched: [] });
 check(
@@ -393,6 +395,17 @@ check(
   answerOf("3")?.action === "run" && answerOf("3").args.cmd === "bun test src" && !answerOf("4")?.note && String(answerOf("5")?.store ?? "").startsWith(process.env.STEM_HOME!) && !spawnSync(stem, ["grafts"], { cwd: hostile, encoding: "utf8" }).stdout.includes("example.invalid"),
   { sh: answerOf("3"), edit: answerOf("4"), store: answerOf("5")?.store },
 );
+check("a .stem folder the repo committed is never carried into Stem's store", !existsSync(join(String(answerOf("5")?.store ?? ""), "adopted.json")), answerOf("5")?.store);
+
+const earlier = mkdtempSync(join(tmpdir(), "stem-earlier-"));
+spawnSync("git", ["init", "-q"], { cwd: earlier });
+spawnSync("mkdir", ["-p", join(earlier, ".stem", "learn"), join(earlier, "src")]);
+writeFileSync(join(earlier, ".stem", ".gitignore"), "*\n");
+writeFileSync(join(earlier, "src", "a.ts"), "export const a = 2\n");
+writeFileSync(join(earlier, ".stem", "learn", "state.json"), JSON.stringify({ sessions: 9, fixes: [{ file: "src/a.ts", before: "export const a = 1\n", after: "export const a = 2\n", request: "a should be two" }] }));
+writeFileSync(join(earlier, ".stem", "learn", "usage.jsonl"), JSON.stringify({ at: Date.now(), session: "old", task: 1, origin: "user", kinds: [], withheld: [], followed: [], shown: true, finished: true, steps: 4 }) + "\n");
+const earlierOut = spawnSync(stem, ["host"], { cwd: earlier, encoding: "utf8", input: '{"id":"1","method":"hello","params":{"protocol":1}}\n{"id":"2","method":"status"}\n{"id":"3","method":"shutdown"}\n' }).stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((m) => m.id === "2")?.result;
+check("what an earlier Stem learned in the project's own .stem carries over to the new store once", earlierOut?.fixes === 1 && earlierOut.usage.turns === 1 && existsSync(join(String(earlierOut.store), "adopted.json")), earlierOut);
 const leaked = spawnSync(stem, ["js"], { cwd: hostile, encoding: "utf8", input: 'return $.sh("printf %s [$GITHUB_TOKEN][$STEM_YOLO][$ZZTEST_API_KEY]").out' }).stdout.trim();
 check("a repo's .env can only provide provider keys, not tokens or Stem settings", leaked === "[][][abc]", leaked
 );

@@ -15,7 +15,47 @@ pub fn project_home(root: &Path) -> PathBuf {
     let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let id: String = Sha256::digest(real.to_string_lossy().as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
     let name: String = real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(40).collect();
-    stem_home().join("projects").join(format!("{name}-{}", &id[..PROJECT_HOME_ID]))
+    let home = stem_home().join("projects").join(format!("{name}-{}", &id[..PROJECT_HOME_ID]));
+    if !home.exists() {
+        adopt_old_store(&real, &home);
+    }
+    home
+}
+
+const OLD_STORE_PARTS: &[&str] = &["learn/state.json", "learn/usage.jsonl", "tools"];
+
+fn stem_folder_is_ours(root: &Path) -> bool {
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(root).env_remove("GIT_DIR").env_remove("GIT_INDEX_FILE").env_remove("GIT_WORK_TREE").output().ok().filter(|o| o.status.success());
+    let inside = git(&["rev-parse", "--is-inside-work-tree"]).is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+    inside && git(&["ls-files", "-z", "--", ":(icase).stem"]).is_some_and(|o| o.stdout.is_empty())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)?.flatten() {
+            if entry.file_type().is_ok_and(|t| !t.is_symlink()) {
+                copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+            }
+        }
+        Ok(())
+    } else {
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+fn adopt_old_store(root: &Path, home: &Path) {
+    let old = root.join(".stem");
+    let state = old.join("learn").join("state.json");
+    if !state.is_file() || std::fs::symlink_metadata(&old).is_ok_and(|m| m.file_type().is_symlink()) || !stem_folder_is_ours(root) {
+        return;
+    }
+    let moved: Vec<&str> = OLD_STORE_PARTS.iter().copied().filter(|part| old.join(part).exists() && copy_tree(&old.join(part), &home.join(part)).is_ok()).collect();
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let _ = std::fs::write(home.join("adopted.json"), serde_json::json!({"from": old, "at": at, "parts": moved}).to_string());
 }
 
 fn provider_key(key: &str) -> bool {

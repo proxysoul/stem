@@ -95,6 +95,20 @@ pub struct Area {
     #[serde(default)]
     pub lately: f64,
     pub checks: BTreeMap<String, Check>,
+    #[serde(default)]
+    pub steps: Vec<u32>,
+}
+
+const STEPS_KEPT: usize = 20;
+const STEPS_MIN_SEEN: usize = 3;
+
+pub fn expected_steps(habits: &Habits, files: &[String]) -> Option<u32> {
+    let mut seen: Vec<u32> = files.iter().filter_map(|f| habits.get(&area(f))).flat_map(|a| a.steps.iter().copied()).collect();
+    if seen.len() < STEPS_MIN_SEEN {
+        return None;
+    }
+    seen.sort_unstable();
+    Some(seen[seen.len() / 2])
 }
 
 pub type Habits = BTreeMap<String, Area>;
@@ -172,7 +186,7 @@ pub fn checks_in(cmd: &str, edited: &[String]) -> Vec<String> {
     out
 }
 
-pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<bool>)], ran_before: &[String], session: u64) {
+pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<bool>)], ran_before: &[String], session: u64, steps: u32) {
     let mut early: Vec<String> = Vec::new();
     for cmd in ran_before {
         for check in checks_in(cmd, changed) {
@@ -204,6 +218,11 @@ pub fn learn(habits: &mut Habits, changed: &[String], ran: &[(String, Option<boo
         }
         entry.turns += 1;
         entry.lately = entry.lately * FADE + 1.0;
+        if steps > 0 {
+            entry.steps.push(steps);
+            let extra = entry.steps.len().saturating_sub(STEPS_KEPT);
+            entry.steps.drain(..extra);
+        }
         for c in entry.checks.values_mut() {
             c.lately *= FADE;
         }

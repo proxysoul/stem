@@ -195,6 +195,8 @@ struct TaskTrail {
 }
 
 const TASK_TRAIL_FILES: usize = 12;
+const TRAIL_REQUEST_CHARS: usize = 160;
+const TRAIL_LAST_LINE_CHARS: usize = 200;
 const TASK_TRAIL_RESULT: usize = 400;
 const MAX_TASK_TRAILS: usize = 40;
 
@@ -232,6 +234,7 @@ pub struct Learn {
     pub acted: bool,
     pub noted_resume: Vec<String>,
     pub checks_before: Vec<String>,
+    pub expected_steps: Option<u32>,
 }
 
 pub fn applied(now: &str, before: &str, after: &str) -> bool {
@@ -392,7 +395,7 @@ impl Learn {
         let dir = crate::env::project_home(root).join("learn");
         let enabled = std::env::var("STEM_LEARN").map(|v| v != "off" && v != "0").unwrap_or(true);
         let state: State = if enabled { std::fs::read_to_string(dir.join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default() } else { State::default() };
-        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new(), acted: false, noted_resume: Vec::new(), checks_before: Vec::new() }
+        Learn { dir, root: root.to_path_buf(), enabled, state, touched: HashSet::new(), tests_run: Vec::new(), edits: Vec::new(), scratch: Vec::new(), last_result: String::new(), events: Vec::new(), preview: false, host: false, decide: None, session: None, offered: None, familiarity: None, checks_run: Vec::new(), habits_told: HashSet::new(), habits_offered: Vec::new(), continues: false, task_hint: None, noted_familiar: Vec::new(), noted_regress: Vec::new(), regress_told: HashSet::new(), acted: false, noted_resume: Vec::new(), checks_before: Vec::new(), expected_steps: None }
     }
 
     fn lock(&self) -> Option<StateLock> {
@@ -1183,12 +1186,14 @@ impl Learn {
             return None;
         }
         self.events.push(("learn_used".into(), json!({"what": "trail", "files": files.len()})));
-        let mut lines = vec![format!("[stem: this continues the task: {}", t.request.trim())];
+        let request: String = t.request.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(TRAIL_REQUEST_CHARS).collect();
+        let mut lines = vec![format!("[stem: this continues the task: {request}")];
         if !files.is_empty() {
-            lines.push(format!("Over {} turn(s) it changed: {}. Start from those instead of searching again.", t.turns, files.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ")));
+            lines.push(format!("It changed {} so far; start there instead of searching again.", files.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ")));
         }
-        if !t.last_result.trim().is_empty() {
-            lines.push(format!("The last turn ended with: {}", t.last_result.trim()));
+        let last_line = t.last_result.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("");
+        if !last_line.is_empty() && last_line.chars().count() <= TRAIL_LAST_LINE_CHARS {
+            lines.push(format!("Last turn ended with: {last_line}"));
         }
         Some(format!("{}]", lines.join("\n")))
     }
@@ -1217,6 +1222,7 @@ impl Learn {
         let prompt = task.as_str();
         let warm = self.warm(prompt);
         self.familiarity = warm.as_ref().map(|w| w.score);
+        self.expected_steps = warm.as_ref().and_then(|w| crate::habits::expected_steps(&self.state.habits, &w.files));
         let files: Vec<String> = warm.as_ref().map(|w| w.files.clone()).unwrap_or_default();
         let mut parts: Vec<(&'static str, String)> = Vec::new();
         if let Some(r) = self.resume_note(prompt) {
@@ -1348,7 +1354,7 @@ impl Learn {
         if on("habits") {
             let worked_on: Vec<String> = changed.iter().filter(|f| trail_target(f)).cloned().collect();
             if !worked_on.is_empty() {
-                crate::habits::learn(&mut self.state.habits, &worked_on, &self.checks_run, &self.checks_before, self.state.sessions);
+                crate::habits::learn(&mut self.state.habits, &worked_on, &self.checks_run, &self.checks_before, self.state.sessions, steps as u32);
             }
         }
         self.state.last_changed = changed.clone();
