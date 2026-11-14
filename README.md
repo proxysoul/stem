@@ -17,7 +17,7 @@ stem login claude-n          # your Claude plan, or any key in ~/.stem/.env
 cd your/project && stem
 ```
 
-Prebuilt for macOS and Linux (Apple Silicon, Intel, x64, arm64). Windows is not supported yet. MIT licensed.
+Prebuilt for macOS, Linux and Windows, on x64 and arm64 (Windows from 0.4.0). On Windows, in PowerShell: `irm https://raw.githubusercontent.com/proxysoul/stem/main/install.ps1 | iex`. MIT licensed.
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="brand/readme/loop-dark.svg"><img alt="The loop: you give a task, the model answers in text or one JavaScript block, the block runs in a QuickJS sandbox that only sees $, and only the return value goes back to the model." src="brand/readme/loop-light.svg" width="100%"></picture>
 
