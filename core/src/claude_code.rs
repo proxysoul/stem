@@ -97,7 +97,7 @@ fn spawn(resolved: &Resolved, system: &str, effort: Option<&str>, max_output: u6
     let bin = binary().ok_or("the claude command is not installed. Install Claude Code and run `claude` once to sign in.")?;
     let home = crate::env::stem_home().join(PROVIDER);
     std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::sys::command(bin);
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
         .args(["--model", &resolved.model.id])
         .args(["--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", "--no-session-persistence"])

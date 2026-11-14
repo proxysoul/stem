@@ -178,7 +178,7 @@ impl Facts {
     }
 
     fn refresh_history(&mut self) -> Result<Value, String> {
-        let head = std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&self.root).output().map_err(|e| e.to_string())?;
+        let head = crate::sys::command("git").args(["rev-parse", "HEAD"]).current_dir(&self.root).output().map_err(|e| e.to_string())?;
         if !head.status.success() {
             return Ok(json!("no git"));
         }
@@ -187,7 +187,7 @@ impl Facts {
         if stored.as_deref() == Some(head.as_str()) {
             return Ok(json!("current"));
         }
-        let log = std::process::Command::new("git")
+        let log = crate::sys::command("git")
             .args(["log", "-n", "3000", "--no-merges", "--name-only", "--format=%x1e%H%x1f%cs%x1f%an%x1f%s"])
             .current_dir(&self.root)
             .output()

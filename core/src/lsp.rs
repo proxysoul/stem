@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -191,7 +191,7 @@ pub fn language_id(path: &Path) -> &'static str {
 impl Server {
     pub fn start(spec: ServerSpec, root: &Path) -> Result<Server, String> {
         let started = Instant::now();
-        let mut child = Command::new(&spec.command)
+        let mut child = crate::sys::command(&spec.command)
             .args(&spec.args)
             .current_dir(root)
             .stdin(Stdio::piped())

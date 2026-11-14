@@ -14,9 +14,12 @@ jobs:
           - { os: macos-15, target: x86_64-apple-darwin }
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc, exe: .exe }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc, exe: .exe }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
+        shell: bash
         working-directory: core
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -30,8 +33,9 @@ jobs:
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - run: |
           cd target/${{ matrix.target }}/release
-          tar czf stem-${{ matrix.target }}.tar.gz stem
-          shasum -a 256 stem-${{ matrix.target }}.tar.gz > stem-${{ matrix.target }}.tar.gz.sha256
+          archive=stem-${{ matrix.target }}.tar.gz
+          tar czf "$archive" "stem${{ matrix.exe }}"
+          if command -v shasum >/dev/null; then shasum -a 256 "$archive"; else sha256sum "$archive"; fi | sed 's/ \*/  /' > "$archive.sha256"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: stem-${{ matrix.target }}
@@ -76,7 +80,7 @@ jobs:
             target=${target#stem-}
             mkdir -p "npm/vendor/$target"
             tar xzf "$archive" -C "npm/vendor/$target"
-            chmod +x "npm/vendor/$target/stem"
+            chmod +x "npm/vendor/$target"/stem*
           done
           cp README.md LICENSE npm/
           cd npm
@@ -85,6 +89,7 @@ jobs:
           test "$(node bin/stem.js --version)" = "stem $version"
           echo "VERSION=$version" >> "$GITHUB_ENV"
       - name: Publish to GitHub Packages
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

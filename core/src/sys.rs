@@ -1,5 +1,21 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::process::Command;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    std::os::windows::process::CommandExt::creation_flags(&mut command, CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(windows))]
+pub fn command(program: impl AsRef<OsStr>) -> Command {
+    Command::new(program)
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct Usage {
@@ -12,7 +28,7 @@ pub fn sample() -> Option<Usage> {
     if cfg!(windows) {
         return None;
     }
-    let out = Command::new("ps").args(["-A", "-o", "pid=,ppid=,rss=,pcpu=,comm="]).output().ok()?;
+    let out = command("ps").args(["-A", "-o", "pid=,ppid=,rss=,pcpu=,comm="]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut stats: HashMap<u32, (u64, f32)> = HashMap::new();
