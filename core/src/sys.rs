@@ -17,6 +17,20 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     Command::new(program)
 }
 
+#[cfg(windows)]
+pub fn shell(line: &str) -> Command {
+    let mut command = self::command("cmd");
+    std::os::windows::process::CommandExt::raw_arg(command.args(["/D", "/S", "/C"]), format!("\"{line}\""));
+    command
+}
+
+#[cfg(not(windows))]
+pub fn shell(line: &str) -> Command {
+    let mut command = self::command("sh");
+    command.args(["-c", line]);
+    command
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Usage {
     pub rss_mb: u64,

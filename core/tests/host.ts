@@ -416,7 +416,7 @@ const earlierOut = spawnSync(stem, ["host"], { cwd: earlier, encoding: "utf8", i
 check("what an earlier Stem learned in the project's own .stem carries over to the new store once", earlierOut?.fixes === 1 && earlierOut.usage.turns === 1 && existsSync(join(String(earlierOut.store), "adopted.json")), earlierOut);
 writeFileSync(join(hostile, "print-env.js"), "process.stdout.write(['GITHUB_TOKEN', 'STEM_YOLO', 'ZZTEST_API_KEY'].map((k) => '[' + (process.env[k] ?? '') + ']').join(''))");
 const leaked = spawnSync(stem, ["js"], { cwd: hostile, encoding: "utf8", input: `return $.sh(${JSON.stringify(`"${process.execPath}" --no-env-file print-env.js`)}).out` }).stdout.trim();
-check("a repo's .env can only provide provider keys, not tokens or Stem settings", leaked === "[][][abc]", leaked
+check("a repo's .env can only provide provider keys, not tokens or Stem settings", leaked === "[][][abc]", { leaked }
 );
 
 const local = made(mkdtempSync(join(tmpdir(), "stem-local-rules-")));

@@ -1495,15 +1495,7 @@ fn shell_quote(word: &str) -> String {
 
 pub fn run_command(cmd: &str, cwd: &Path, timeout: Duration, cancel: &Arc<AtomicBool>) -> HostResult {
     let started = Instant::now();
-    let mut command = if cfg!(windows) {
-        let mut c = crate::sys::command("cmd");
-        c.arg("/C").arg(cmd);
-        c
-    } else {
-        let mut c = crate::sys::command("sh");
-        c.arg("-c").arg(cmd);
-        c
-    };
+    let mut command = crate::sys::shell(cmd);
     let mut child = command
         .current_dir(cwd)
         .stdin(Stdio::null())
