@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1495,15 +1495,7 @@ fn shell_quote(word: &str) -> String {
 
 pub fn run_command(cmd: &str, cwd: &Path, timeout: Duration, cancel: &Arc<AtomicBool>) -> HostResult {
     let started = Instant::now();
-    let mut command = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(cmd);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(cmd);
-        c
-    };
+    let mut command = crate::sys::shell(cmd);
     let mut child = command
         .current_dir(cwd)
         .stdin(Stdio::null())

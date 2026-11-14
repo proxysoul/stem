@@ -3,7 +3,7 @@ use crate::llm::{Block, Msg, Reply, Stop, Tool, Usage};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -111,7 +111,7 @@ pub fn complete(resolved: &Resolved, effort: Option<&str>, max_output: u64, syst
         "max_tokens": max_output,
         "effort": effort,
     });
-    let mut child = Command::new(&parts[0])
+    let mut child = crate::sys::command(&parts[0])
         .args(&parts[1..])
         .env("STEM_GRAFT", &resolved.provider_id)
         .env("STEM_GRAFT_DIR", path.parent().unwrap_or(Path::new(".")))

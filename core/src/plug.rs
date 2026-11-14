@@ -197,6 +197,8 @@ impl Server {
                 let show_all = self.show_all;
                 if let (Outcome::Run { name, args, .. }, Some(seen)) = (&outcome, params["session"].as_str().and_then(|s| self.seen.get_mut(s))) {
                     if let Some(path) = args["path"].as_str().filter(|_| matches!(name.as_str(), "read" | "edit" | "write")) {
+                        let path = crate::env::project_path(&self.root, path);
+                        let path = path.as_str();
                         let mut learn = Learn::open(&self.root);
                         learn.regress_told = std::mem::take(&mut seen.undone_told);
                         if let Some(note) = learn.undone_at(path).filter(|_| name != "write") {
@@ -245,9 +247,9 @@ impl Server {
                     return Ok(unlearned(&self.root));
                 }
                 let edits: Option<Vec<(String, String, String)>> = params["edits"].as_array().map(|a| {
-                    a.iter().filter_map(|e| Some((e["file"].as_str()?.to_string(), e["before"].as_str().unwrap_or("").to_string(), e["after"].as_str().unwrap_or("").to_string()))).collect()
+                    a.iter().filter_map(|e| Some((crate::env::project_path(&self.root, e["file"].as_str()?), e["before"].as_str().unwrap_or("").to_string(), e["after"].as_str().unwrap_or("").to_string()))).collect()
                 });
-                let touched = strings(&params["touched"]);
+                let touched = strings(&params["touched"]).map(|list| list.iter().map(|f| crate::env::project_path(&self.root, f)).collect::<Vec<_>>());
                 let reported = Reported {
                     edits: if self.reports_edits { Some(edits.unwrap_or_default()) } else { edits },
                     touched: if self.reports_edits { Some(touched.unwrap_or_default()) } else { touched },

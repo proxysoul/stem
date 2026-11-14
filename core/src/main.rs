@@ -1015,7 +1015,7 @@ fn mcp_tools(root: &std::path::Path, learned: &[String]) -> Vec<Value> {
 }
 
 fn git_changed(root: &std::path::Path) -> Vec<String> {
-    std::process::Command::new("git")
+    crate::sys::command("git")
         .args(["status", "--porcelain", "--untracked-files=all"])
         .current_dir(root)
         .output()

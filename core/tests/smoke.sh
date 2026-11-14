@@ -57,6 +57,6 @@ for f in .claude/settings.json .mcp.json .claude/skills/stem/SKILL.md .codex/hoo
 "$STEM" integrate >/dev/null
 [ "$(grep -c 'stem hook prompt' .claude/settings.json)" = "1" ] && [ "$(grep -c '^\[mcp_servers.stem\]' .codex/config.toml)" = "1" ] && pass "integrate writes every harness and is idempotent" || fail "integrate duplicated hooks"
 if command -v bun >/dev/null; then
-  bun "$HERE/host.ts" "$STEM" >/dev/null && pass "stem host speaks the host protocol" || fail "stem host: run bun $HERE/host.ts $STEM"
+  hosted=$(bun "$HERE/host.ts" "$STEM" 2>&1) && pass "stem host speaks the host protocol" || { echo "$hosted" | grep -v '^ok '; fail "stem host"; }
 fi
 echo "all smoke checks passed"

@@ -4,7 +4,7 @@ One Rust binary (6.8 MB release build) with QuickJS inside. It works in the fold
 
 ## Install and start
 
-Prebuilt for macOS and Linux (arm64 and x64). Windows is not supported yet.
+Prebuilt for macOS, Linux and Windows, on arm64 and x64 (Windows from 0.4.0). On Windows, `install.ps1` does the same as `install.sh`: `irm https://raw.githubusercontent.com/proxysoul/stem/main/install.ps1 | iex` in PowerShell. Commands that scripts run with `$.sh` go through `cmd` there.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/proxysoul/stem/main/install.sh | sh   # prebuilt, checksum-checked

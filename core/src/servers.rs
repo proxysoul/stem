@@ -2,7 +2,7 @@ use crate::lsp::ServerSpec;
 use serde_json::Value;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 
 const RECHECK_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
@@ -87,7 +87,7 @@ fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn runs(command: &Path, args: &[&str]) -> bool {
-    Command::new(command)
+    crate::sys::command(command)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

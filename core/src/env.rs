@@ -10,6 +10,19 @@ const PROJECT_HOME_ID: usize = 12;
 const PROVIDER_KEY_ENDING: &str = "_API_KEY";
 const NEVER_FROM_A_PROJECT: &[&str] = &["STEM_", "GIT_", "LD_", "DYLD_"];
 
+pub fn project_path(root: &Path, raw: &str) -> String {
+    let given = Path::new(raw);
+    let relative = if given.is_absolute() {
+        let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let file = std::fs::canonicalize(given).unwrap_or_else(|_| given.to_path_buf());
+        file.strip_prefix(&real).or_else(|_| given.strip_prefix(root)).map(Path::to_path_buf).unwrap_or_else(|_| given.to_path_buf())
+    } else {
+        given.to_path_buf()
+    };
+    let slashed = relative.to_string_lossy().replace('\\', "/");
+    slashed.trim_start_matches("./").to_string()
+}
+
 pub fn project_home(root: &Path) -> PathBuf {
     use sha2::{Digest, Sha256};
     let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -25,7 +38,7 @@ pub fn project_home(root: &Path) -> PathBuf {
 const OLD_STORE_PARTS: &[&str] = &["learn/state.json", "learn/usage.jsonl", "tools"];
 
 fn stem_folder_is_ours(root: &Path) -> bool {
-    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(root).env_remove("GIT_DIR").env_remove("GIT_INDEX_FILE").env_remove("GIT_WORK_TREE").output().ok().filter(|o| o.status.success());
+    let git = |args: &[&str]| crate::sys::command("git").args(args).current_dir(root).env_remove("GIT_DIR").env_remove("GIT_INDEX_FILE").env_remove("GIT_WORK_TREE").output().ok().filter(|o| o.status.success());
     let inside = git(&["rev-parse", "--is-inside-work-tree"]).is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
     inside && git(&["ls-files", "-z", "--", ":(icase).stem"]).is_some_and(|o| o.stdout.is_empty())
 }

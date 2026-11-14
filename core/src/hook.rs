@@ -2,13 +2,12 @@ use crate::learn::Learn;
 use serde_json::{Value, json};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const REUSE_SECS: u64 = 10;
 const FIX_CHARS: usize = 400;
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).current_dir(root).output().ok()?;
+    let out = crate::sys::command("git").args(args).current_dir(root).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 

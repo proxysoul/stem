@@ -76,7 +76,7 @@ fn unix_now() -> u64 {
 }
 
 fn undone_in_a_commit(root: &Path, file: &str, after: &str) -> bool {
-    std::process::Command::new("git")
+    crate::sys::command("git")
         .args(["log", "--format=%H", "-S", after, "--", file])
         .current_dir(root)
         .output()
@@ -1437,7 +1437,7 @@ impl Learn {
 }
 
 pub fn calibrate(root: &Path) -> Value {
-    let dirty = std::process::Command::new("git").args(["status", "--porcelain", "--untracked-files=no"]).current_dir(root).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
+    let dirty = crate::sys::command("git").args(["status", "--porcelain", "--untracked-files=no"]).current_dir(root).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
     if dirty {
         return json!({"skipped": "uncommitted changes: test results would not describe a clean checkout"});
     }
