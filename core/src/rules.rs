@@ -10,6 +10,15 @@ enum Calls {
     Many(Vec<String>),
 }
 
+impl Calls {
+    fn matches(&self, call: &str) -> bool {
+        match self {
+            Calls::One(c) => c == "*" || c == call,
+            Calls::Many(cs) => cs.iter().any(|c| c == "*" || c == call),
+        }
+    }
+}
+
 #[derive(Deserialize, Clone)]
 struct Match {
     call: Calls,
@@ -49,6 +58,7 @@ struct RawRule {
 struct Rule {
     raw: RawRule,
     pattern: Option<Regex>,
+    rewrite_regex: Option<Regex>,
     source: &'static str,
 }
 
@@ -126,7 +136,7 @@ fn built_in() -> Vec<Rule> {
     .into_iter()
     .filter_map(|raw| {
         let pattern = Regex::new(raw.when.pattern.as_deref().unwrap_or_default()).ok()?;
-        Some(Rule { raw, pattern: Some(pattern), source: "built-in" })
+        Some(Rule { raw, pattern: Some(pattern), rewrite_regex: None, source: "built-in" })
     })
     .collect()
 }
@@ -177,7 +187,22 @@ impl Rules {
                         continue;
                     }
                 };
-                rules.push(Rule { raw: r, pattern, source });
+                let rewrite_regex = if r.action == "rewrite" {
+                    if let Some(rw) = &r.rewrite {
+                        match Regex::new(&rw.from) {
+                            Ok(re) => Some(re),
+                            Err(e) => {
+                                problems.push(format!("{}: rule {} rewrite pattern: {e}", path.display(), r.name));
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                rules.push(Rule { raw: r, pattern, rewrite_regex, source });
             }
         }
         rules.extend(built_in());
@@ -191,11 +216,7 @@ impl Rules {
     pub fn apply(&self, call: &str, args: &Value) -> (Outcome, Option<Value>) {
         let text = subject(call, args);
         for rule in &self.rules {
-            let calls = match &rule.raw.when.call {
-                Calls::One(c) => vec![c.as_str()],
-                Calls::Many(cs) => cs.iter().map(String::as_str).collect(),
-            };
-            if !calls.iter().any(|c| *c == "*" || *c == call) {
+            if !rule.raw.when.call.matches(call) {
                 continue;
             }
             let caps = match &rule.pattern {
@@ -217,7 +238,7 @@ impl Rules {
                 "rewrite" => {
                     let rw = rule.raw.rewrite.as_ref().expect("checked at load");
                     let mut next = args.clone();
-                    if let (Some(key), Ok(from)) = (subject_key(call), Regex::new(&rw.from)) {
+                    if let (Some(key), Some(from)) = (subject_key(call), &rule.rewrite_regex) {
                         next[key] = json!(from.replace_all(&text, rw.to.as_str()).into_owned());
                     }
                     let shown = format!("rule {} changed this call", rule.raw.name);
@@ -237,5 +258,71 @@ impl Rules {
             return (outcome, Some(hit));
         }
         (Outcome::Run { name: call.to_string(), args: args.clone(), note: None }, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calls_matches_zero_alloc() {
+        let one = Calls::One("sh".into());
+        assert!(one.matches("sh"));
+        assert!(!one.matches("read"));
+
+        let star = Calls::One("*".into());
+        assert!(star.matches("sh"));
+        assert!(star.matches("anything"));
+
+        let many = Calls::Many(vec!["read".into(), "write".into()]);
+        assert!(many.matches("read"));
+        assert!(many.matches("write"));
+        assert!(!many.matches("sh"));
+
+        let many_star = Calls::Many(vec!["read".into(), "*".into()]);
+        assert!(many_star.matches("random"));
+    }
+
+    #[test]
+    fn test_builtin_redirect() {
+        let rules = Rules { rules: built_in(), problems: Vec::new() };
+        let (outcome, hit) = rules.apply("sh", &json!({"cmd": "cat README.md"}));
+        assert!(hit.is_some());
+        match outcome {
+            Outcome::Run { name, args, .. } => {
+                assert_eq!(name, "read");
+                assert_eq!(args["path"], "README.md");
+            }
+            Outcome::Deny(_) => panic!("expected redirect, got deny"),
+        }
+    }
+
+    #[test]
+    fn test_precompiled_rewrite_rule() {
+        let rule = Rule {
+            raw: RawRule {
+                name: "rewrite-test".into(),
+                when: Match { call: Calls::One("sh".into()), pattern: None },
+                action: "rewrite".into(),
+                reason: None,
+                rewrite: Some(Rewrite { from: r"foo(\d+)".into(), to: r"bar$1".into() }),
+                redirect: None,
+                note: None,
+            },
+            pattern: None,
+            rewrite_regex: Some(Regex::new(r"foo(\d+)").unwrap()),
+            source: "user",
+        };
+        let rules = Rules { rules: vec![rule], problems: Vec::new() };
+        let (outcome, hit) = rules.apply("sh", &json!({"cmd": "echo foo123"}));
+        assert!(hit.is_some());
+        match outcome {
+            Outcome::Run { name, args, .. } => {
+                assert_eq!(name, "sh");
+                assert_eq!(args["cmd"], "echo bar123");
+            }
+            Outcome::Deny(_) => panic!("expected rewrite run"),
+        }
     }
 }

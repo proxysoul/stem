@@ -504,15 +504,22 @@ enum StreamError {
     Fatal(String),
 }
 
-fn sse_events<R: BufRead>(reader: R, cancel: &Arc<AtomicBool>, mut on: impl FnMut(&str, Value) -> Result<bool, StreamError>) -> Result<(), StreamError> {
+fn sse_events<R: BufRead>(mut reader: R, cancel: &Arc<AtomicBool>, mut on: impl FnMut(&str, Value) -> Result<bool, StreamError>) -> Result<(), StreamError> {
     let mut event = String::new();
-    for line in reader.lines() {
+    let mut buf = String::new();
+    loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(StreamError::Cancelled);
         }
-        let line = line.map_err(|e| StreamError::Retry(format!("stream broke: {e}")))?;
+        buf.clear();
+        let bytes = reader.read_line(&mut buf).map_err(|e| StreamError::Retry(format!("stream broke: {e}")))?;
+        if bytes == 0 {
+            break;
+        }
+        let line = buf.trim_end_matches(['\r', '\n']);
         if let Some(name) = line.strip_prefix("event:") {
-            event = name.trim().to_string();
+            event.clear();
+            event.push_str(name.trim());
         } else if let Some(data) = line.strip_prefix("data:") {
             let data = data.trim();
             if data == "[DONE]" {
@@ -745,4 +752,38 @@ fn read_responses<R: BufRead>(reader: R, cancel: &Arc<AtomicBool>) -> Result<Rep
     })?;
     let stop = stop.ok_or_else(|| StreamError::Retry("the stream ended before the model finished".into()))?;
     Ok(Reply { blocks, stop, usage })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_sse_events_reusable_line_buffer() {
+        let input = "event: ping\ndata: {\"ok\": true}\n\nevent: message\ndata: {\"text\": \"hello\"}\ndata: [DONE]\n";
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+
+        let res = sse_events(Cursor::new(input), &cancel, |ev, val| {
+            events.push((ev.to_string(), val));
+            Ok(true)
+        });
+
+        assert!(res.is_ok());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "ping");
+        assert_eq!(events[0].1["ok"], true);
+        assert_eq!(events[1].0, "message");
+        assert_eq!(events[1].1["text"], "hello");
+    }
+
+    #[test]
+    fn test_sse_events_cancellation() {
+        let input = "data: {\"a\": 1}\ndata: {\"b\": 2}\n";
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let res = sse_events(Cursor::new(input), &cancel, |_, _| Ok(true));
+        assert!(matches!(res, Err(StreamError::Cancelled)));
+    }
 }

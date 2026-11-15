@@ -101,7 +101,7 @@ impl Facts {
         let dir = crate::env::project_home(root);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let db = Connection::open(dir.join("facts.db")).map_err(|e| format!("fact store: {e}"))?;
-        db.execute_batch("pragma journal_mode = wal; pragma synchronous = normal;").map_err(|e| e.to_string())?;
+        db.execute_batch("pragma journal_mode = wal; pragma synchronous = normal; pragma cache_size = -64000; pragma temp_store = memory; pragma mmap_size = 268435456; pragma busy_timeout = 5000;").map_err(|e| e.to_string())?;
         db.execute_batch(SCHEMA).map_err(|e| format!("fact store schema: {e}"))?;
         Ok(Facts { db, root: root.to_path_buf(), fresh_at: None })
     }
@@ -133,14 +133,14 @@ impl Facts {
             }
         }
         let removed: Vec<String> = known.keys().filter(|k| !seen.contains(*k)).cloned().collect();
+        let configs = configs();
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(12);
         let chunk = todo.len().div_ceil(threads).max(1);
         let parsed: Vec<Parsed> = std::thread::scope(|scope| {
             let handles: Vec<_> = todo
                 .chunks(chunk)
                 .map(|part| {
-                    scope.spawn(move || {
-                        let configs = configs();
+                    scope.spawn(|| {
                         let mut ctx = TagsContext::new();
                         part.iter().map(|(p, rel, g, size, mtime)| parse(p, rel.clone(), g, &configs, &mut ctx, *size, *mtime)).collect::<Vec<_>>()
                     })
@@ -195,7 +195,7 @@ impl Facts {
         let text = String::from_utf8_lossy(&log.stdout);
         let tx = self.db.transaction().map_err(|e| e.to_string())?;
         tx.execute_batch("delete from commits; delete from commit_files; delete from cochange;").map_err(|e| e.to_string())?;
-        let mut pairs: HashMap<(String, String), i64> = HashMap::new();
+        let mut pairs: HashMap<(&str, &str), i64> = HashMap::new();
         let mut count = 0;
         {
             let mut ins_c = tx.prepare("insert or ignore into commits values (?1, ?2, ?3, ?4)").map_err(|e| e.to_string())?;
@@ -212,10 +212,10 @@ impl Facts {
                     ins_f.execute(params![header[0], f]).map_err(|e| e.to_string())?;
                 }
                 if files.len() <= 24 {
-                    for a in &files {
-                        for b in &files {
+                    for &a in &files {
+                        for &b in &files {
                             if a != b {
-                                *pairs.entry((a.to_string(), b.to_string())).or_default() += 1;
+                                *pairs.entry((a, b)).or_default() += 1;
                             }
                         }
                     }
@@ -223,7 +223,7 @@ impl Facts {
                 count += 1;
             }
             let mut ins_p = tx.prepare("insert into cochange values (?1, ?2, ?3)").map_err(|e| e.to_string())?;
-            for ((a, b), n) in pairs.iter().filter(|(_, n)| **n >= 2) {
+            for (&(a, b), n) in pairs.iter().filter(|(_, n)| **n >= 2) {
                 ins_p.execute(params![a, b, n]).map_err(|e| e.to_string())?;
             }
             tx.execute("insert or replace into meta values ('head', ?1)", [&head]).map_err(|e| e.to_string())?;
@@ -249,22 +249,23 @@ impl Facts {
             })
             .collect();
         let mut rows = stmt.query(rusqlite::params_from_iter(bound.iter())).map_err(|e| format!("$.sql: {e}"))?;
+        let template: serde_json::Map<String, Value> = names.iter().map(|s| (s.clone(), Value::Null)).collect();
+        let col_indices: Vec<usize> = template.keys().map(|k| names.iter().rposition(|n| n == k).unwrap()).collect();
         let mut out = Vec::new();
         while let Some(row) = rows.next().map_err(|e| format!("$.sql: {e}"))? {
             if out.len() >= 5000 {
                 out.push(json!({"…": "cut at 5000 rows; add a limit or a narrower where"}));
                 break;
             }
-            let mut obj = serde_json::Map::new();
-            for (i, name) in names.iter().enumerate() {
-                let v = match row.get_ref(i).map_err(|e| e.to_string())? {
+            let mut obj = template.clone();
+            for (val, &col_idx) in obj.values_mut().zip(&col_indices) {
+                *val = match row.get_ref(col_idx).map_err(|e| e.to_string())? {
                     ValueRef::Null => Value::Null,
                     ValueRef::Integer(n) => json!(n),
                     ValueRef::Real(f) => json!(f),
                     ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
                     ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
                 };
-                obj.insert(name.clone(), v);
             }
             out.push(Value::Object(obj));
         }

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 STEM=${STEM:-stem}
+if [[ "$STEM" != /* ]] && [ -f "$STEM" ]; then
+  STEM="$(cd "$(dirname "$STEM")" && pwd)/$(basename "$STEM")"
+fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT

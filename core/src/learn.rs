@@ -421,11 +421,22 @@ impl Learn {
             return;
         }
         let _ = std::fs::create_dir_all(&self.dir);
-        if let Ok(t) = serde_json::to_string_pretty(&self.state) {
-            let tmp = self.dir.join(format!("state.json.{}", std::process::id()));
-            if std::fs::write(&tmp, t).is_ok() && std::fs::rename(&tmp, self.dir.join("state.json")).is_err() {
+        let tmp = self.dir.join(format!("state.json.{}", std::process::id()));
+        let write_ok = (|| -> Result<(), std::io::Error> {
+            let file = std::fs::File::create(&tmp)?;
+            let mut writer = std::io::BufWriter::new(file);
+            serde_json::to_writer_pretty(&mut writer, &self.state).map_err(std::io::Error::other)?;
+            use std::io::Write;
+            writer.flush()?;
+            Ok(())
+        })().is_ok();
+
+        if write_ok {
+            if std::fs::rename(&tmp, self.dir.join("state.json")).is_err() {
                 let _ = std::fs::remove_file(&tmp);
             }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -1522,4 +1533,40 @@ fn content_hash(path: &Path) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::fs::read(path).unwrap_or_default().hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_learn_streaming_save_and_reload() {
+        let tmp_root = std::env::temp_dir().join(format!("stem_test_learn_root_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_root);
+        let mut learn = Learn::open(&tmp_root);
+        learn.state.test_command = Some("cargo test".to_string());
+        learn.state.failures.insert("test_foo".into(), Failure {
+            test: "test_foo".into(),
+            file: "src/foo.rs".into(),
+            seen: 3,
+            clean: true,
+        });
+        learn.save();
+
+        let state_path = learn.dir.join("state.json");
+        assert!(state_path.exists());
+
+        // Check no tmp file left behind
+        let tmp_pattern = format!("state.json.{}", std::process::id());
+        assert!(!learn.dir.join(tmp_pattern).exists());
+
+        // Reload into clean struct
+        let mut reloaded = Learn::open(&tmp_root);
+        reloaded.reload();
+        assert_eq!(reloaded.state.test_command.as_deref(), Some("cargo test"));
+        assert_eq!(reloaded.state.failures.get("test_foo").map(|f| f.seen), Some(3));
+
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        let _ = std::fs::remove_dir_all(crate::env::project_home(&tmp_root));
+    }
 }

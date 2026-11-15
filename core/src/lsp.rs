@@ -42,15 +42,15 @@ pub struct Server {
 pub fn uri(path: &Path) -> String {
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let s = abs.to_string_lossy().replace('\\', "/");
-    let encoded: String = s
-        .chars()
-        .map(|c| match c {
-            ' ' => "%20".to_string(),
-            '#' => "%23".to_string(),
-            '?' => "%3F".to_string(),
-            c => c.to_string(),
-        })
-        .collect();
+    let mut encoded = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            ' ' => encoded.push_str("%20"),
+            '#' => encoded.push_str("%23"),
+            '?' => encoded.push_str("%3F"),
+            c => encoded.push(c),
+        }
+    }
     if encoded.starts_with('/') {
         format!("file://{encoded}")
     } else {
@@ -386,5 +386,26 @@ impl Drop for Server {
         std::thread::sleep(Duration::from_millis(50));
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_uri_encoding_and_roundtrip() {
+        let p = Path::new("/tmp/test dir/file#1?query.rs");
+        let u = uri(p);
+        assert!(u.starts_with("file:///tmp/test%20dir/file%231%3Fquery.rs") || u.starts_with("file://"));
+        assert!(u.contains("%20"));
+        assert!(u.contains("%23"));
+        assert!(u.contains("%3F"));
+        assert!(!u.contains(" "));
+        assert!(!u.contains('#'));
+        assert!(!u.contains('?'));
+
+        let decoded = path_of(&u);
+        assert_eq!(decoded, std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
     }
 }
