@@ -1,4 +1,5 @@
 use rquickjs::{Context, Promise, Runtime, prelude::Func};
+use serde::Deserialize;
 use serde_json::Value;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -23,6 +24,22 @@ pub struct Outcome {
     pub line: Option<u64>,
     pub log: Vec<String>,
     pub timed_out: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct RawOutcome {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    value: Value,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default, rename = "call")]
+    failed_call: Option<String>,
+    #[serde(default)]
+    line: Option<u64>,
+    #[serde(default)]
+    log: Vec<String>,
 }
 
 impl Sandbox {
@@ -69,19 +86,14 @@ impl Sandbox {
         self.deadline.set(None);
         match raw {
             Ok(text) => {
-                let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                let raw: RawOutcome = serde_json::from_str(&text).unwrap_or_default();
                 Outcome {
-                    ok: v["ok"].as_bool().unwrap_or(false),
-                    value: v["value"].clone(),
-                    error: v["error"].as_str().map(str::to_string),
-                    failed_call: v["call"].as_str().map(str::to_string),
-                    line: v["line"].as_u64(),
-                    log: v["log"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|l| l.as_str().map(str::to_string))
-                        .collect(),
+                    ok: raw.ok,
+                    value: raw.value,
+                    error: raw.error,
+                    failed_call: raw.failed_call,
+                    line: raw.line,
+                    log: raw.log,
                     timed_out,
                 }
             }
@@ -125,5 +137,57 @@ fn describe(ctx: &rquickjs::Ctx, error: rquickjs::Error) -> String {
             }
         }
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_raw_outcome_deserialization() {
+        let text = json!({
+            "ok": true,
+            "value": {"result": 42},
+            "log": ["log 1", "log 2"]
+        }).to_string();
+
+        let raw: RawOutcome = serde_json::from_str(&text).unwrap_or_default();
+        assert!(raw.ok);
+        assert_eq!(raw.value["result"], 42);
+        assert_eq!(raw.log, vec!["log 1", "log 2"]);
+        assert!(raw.error.is_none());
+        assert!(raw.failed_call.is_none());
+
+        let err_text = json!({
+            "ok": false,
+            "error": "something failed",
+            "call": "grep",
+            "line": 10,
+            "log": ["step 1"]
+        }).to_string();
+
+        let raw_err: RawOutcome = serde_json::from_str(&err_text).unwrap_or_default();
+        assert!(!raw_err.ok);
+        assert_eq!(raw_err.error.as_deref(), Some("something failed"));
+        assert_eq!(raw_err.failed_call.as_deref(), Some("grep"));
+        assert_eq!(raw_err.line, Some(10));
+        assert_eq!(raw_err.log, vec!["step 1"]);
+    }
+
+    #[test]
+    fn test_sandbox_run_success_and_error() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sandbox = Sandbox::new(|_, _| "{}".into(), cancel).expect("sandbox init");
+
+        let outcome = sandbox.run("console.log('hi'); return 1 + 2;", Duration::from_secs(5));
+        assert!(outcome.ok);
+        assert_eq!(outcome.value, json!(3));
+        assert!(outcome.log.contains(&"hi".to_string()));
+
+        let err_outcome = sandbox.run("throw new Error('boom');", Duration::from_secs(5));
+        assert!(!err_outcome.ok);
+        assert!(err_outcome.error.unwrap_or_default().contains("boom"));
     }
 }

@@ -63,9 +63,99 @@ pub struct Link {
     sessions: RefCell<Vec<Session>>,
 }
 
+fn hash_value<H: Hasher>(val: &Value, h: &mut H) {
+    match val {
+        Value::Null => 0u8.hash(h),
+        Value::Bool(b) => {
+            1u8.hash(h);
+            b.hash(h);
+        }
+        Value::Number(n) => {
+            2u8.hash(h);
+            if let Some(i) = n.as_i64() {
+                0u8.hash(h);
+                i.hash(h);
+            } else if let Some(u) = n.as_u64() {
+                1u8.hash(h);
+                u.hash(h);
+            } else if let Some(f) = n.as_f64() {
+                2u8.hash(h);
+                f.to_bits().hash(h);
+            }
+        }
+        Value::String(s) => {
+            3u8.hash(h);
+            s.hash(h);
+        }
+        Value::Array(arr) => {
+            4u8.hash(h);
+            arr.len().hash(h);
+            for item in arr {
+                hash_value(item, h);
+            }
+        }
+        Value::Object(map) => {
+            5u8.hash(h);
+            map.len().hash(h);
+            for (k, v) in map {
+                k.hash(h);
+                hash_value(v, h);
+            }
+        }
+    }
+}
+
+fn hash_block<H: Hasher>(b: &Block, h: &mut H) {
+    match b {
+        Block::Text(t) => {
+            0u8.hash(h);
+            t.hash(h);
+        }
+        Block::Thinking { text, signature } => {
+            1u8.hash(h);
+            text.hash(h);
+            signature.hash(h);
+        }
+        Block::RedactedThinking(data) => {
+            2u8.hash(h);
+            data.hash(h);
+        }
+        Block::Reasoning(val) => {
+            3u8.hash(h);
+            hash_value(val, h);
+        }
+        Block::ToolUse { id, name, input } => {
+            4u8.hash(h);
+            id.hash(h);
+            name.hash(h);
+            hash_value(input, h);
+        }
+        Block::ToolResult { id, content, is_error } => {
+            5u8.hash(h);
+            id.hash(h);
+            content.hash(h);
+            is_error.hash(h);
+        }
+    }
+}
+
+fn hash_msg<H: Hasher>(m: &Msg, h: &mut H) {
+    match m.role {
+        Role::User => 0u8.hash(h),
+        Role::Assistant => 1u8.hash(h),
+    }
+    m.blocks.len().hash(h);
+    for b in &m.blocks {
+        hash_block(b, h);
+    }
+}
+
 fn fingerprint(msgs: &[Msg]) -> u64 {
     let mut h = DefaultHasher::new();
-    format!("{msgs:?}").hash(&mut h);
+    msgs.len().hash(&mut h);
+    for m in msgs {
+        hash_msg(m, &mut h);
+    }
     h.finish()
 }
 
@@ -239,5 +329,52 @@ impl Link {
             sessions.remove(0);
         }
         Ok(reply)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fingerprint_uniqueness_and_determinism() {
+        let msg1 = Msg {
+            role: Role::User,
+            blocks: vec![Block::Text("hello".into())],
+        };
+        let msg2 = Msg {
+            role: Role::Assistant,
+            blocks: vec![Block::Text("hello".into())],
+        };
+        let msg3 = Msg {
+            role: Role::User,
+            blocks: vec![Block::Text("world".into())],
+        };
+        let msg4 = Msg {
+            role: Role::User,
+            blocks: vec![Block::ToolUse {
+                id: "call_1".into(),
+                name: "js".into(),
+                input: json!({"code": "1 + 1"}),
+            }],
+        };
+
+        // Determinism
+        assert_eq!(fingerprint(&[msg1.clone()]), fingerprint(&[msg1.clone()]));
+
+        // Role sensitivity
+        assert_ne!(fingerprint(&[msg1.clone()]), fingerprint(&[msg2.clone()]));
+
+        // Content sensitivity
+        assert_ne!(fingerprint(&[msg1.clone()]), fingerprint(&[msg3.clone()]));
+
+        // Block type sensitivity
+        assert_ne!(fingerprint(&[msg1.clone()]), fingerprint(&[msg4.clone()]));
+
+        // Sequence sensitivity
+        assert_ne!(
+            fingerprint(&[msg1.clone(), msg2.clone()]),
+            fingerprint(&[msg2.clone(), msg1.clone()])
+        );
     }
 }

@@ -350,10 +350,28 @@ impl Host {
         if from.is_none() && to.is_none() {
             return Ok(json!(text));
         }
-        let lines: Vec<&str> = text.lines().collect();
         let start = from.unwrap_or(1).max(1) as usize;
-        let end = (to.unwrap_or(lines.len() as u64) as usize).min(lines.len());
-        Ok(json!(lines.get(start - 1..end).map(|s| s.join("\n")).unwrap_or_default()))
+        let count = match to {
+            Some(t) => {
+                let end = t as usize;
+                if end < start {
+                    0
+                } else {
+                    end - start + 1
+                }
+            }
+            None => usize::MAX,
+        };
+        let mut out = String::new();
+        let mut first = true;
+        for line in text.lines().skip(start - 1).take(count) {
+            if !first {
+                out.push('\n');
+            }
+            first = false;
+            out.push_str(line);
+        }
+        Ok(json!(out))
     }
 
     fn write(&mut self, a: &Value) -> HostResult {
@@ -498,11 +516,11 @@ impl Host {
         let mut out: Vec<String> = Vec::new();
         let mut total = 0;
         for path in walk(&base) {
-            let rel = self.rel(&path);
-            if matcher.as_ref().is_none_or(|m| m.is_match(&rel)) {
+            let candidate = path.strip_prefix(&self.root).unwrap_or(&path);
+            if matcher.as_ref().is_none_or(|m| m.is_match(candidate)) {
                 total += 1;
                 if out.len() < max {
-                    out.push(rel);
+                    out.push(self.rel(&path));
                 }
             }
         }
@@ -541,21 +559,30 @@ impl Host {
             Box::new(walk(&base))
         };
         for path in files {
-            let rel = self.rel(&path);
-            if matcher.as_ref().is_some_and(|m| !m.is_match(&rel)) {
+            let candidate = path.strip_prefix(&self.root).unwrap_or(&path);
+            if matcher.as_ref().is_some_and(|m| !m.is_match(candidate)) {
                 continue;
             }
             let Ok(bytes) = std::fs::read(&path) else { continue };
             if bytes.len() > 4_000_000 || bytes.iter().take(4096).any(|b| *b == 0) {
                 continue;
             }
-            let text = String::from_utf8_lossy(&bytes);
+            let text_cow;
+            let text: &str = match std::str::from_utf8(&bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    text_cow = String::from_utf8_lossy(&bytes);
+                    &text_cow
+                }
+            };
+            let mut rel: Option<String> = None;
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
                     total += 1;
                     if rows.len() < max {
                         let shown: String = line.trim().chars().take(240).collect();
-                        rows.push(json!({"file": rel, "line": i + 1, "text": shown}));
+                        let r = rel.get_or_insert_with(|| self.rel(&path));
+                        rows.push(json!({"file": r, "line": i + 1, "text": shown}));
                     }
                 }
             }
@@ -1564,6 +1591,9 @@ pub fn run_command(cmd: &str, cwd: &Path, timeout: Duration, cancel: &Arc<Atomic
 }
 
 fn strip_ansi(s: &str) -> String {
+    if !s.contains('\x1b') {
+        return s.to_string();
+    }
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -1776,4 +1806,149 @@ fn dedup(rows: &mut Vec<Value>) {
 pub fn looks_like_test(cmd: &str) -> bool {
     let c = cmd.to_lowercase();
     ["vitest", "jest", "bun test", "pytest", "cargo test", "go test", "npm test", "npm run test", "bun run test", "pnpm test", "yarn test", "mocha", "ava"].iter().any(|k| c.contains(k))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_ansi_fast_path_and_stripping() {
+        // Fast-path: no escape characters
+        let clean = "Hello, world! This is clean text with 123 numbers.";
+        assert_eq!(strip_ansi(clean), clean);
+
+        // Escape sequence present
+        let colored = "\x1b[31mRed Text\x1b[0m normal";
+        assert_eq!(strip_ansi(colored), "Red Text normal");
+
+        // Multiple sequences and edge cases
+        let complex = "\x1b[1;32mBright Green\x1b[m and \x1b[34mBlue\x1b[0m";
+        assert_eq!(strip_ansi(complex), "Bright Green and Blue");
+
+        // Empty string
+        assert_eq!(strip_ansi(""), "");
+    }
+
+    #[test]
+    fn test_host_read_slice_and_bounds() {
+        let tmp = std::env::temp_dir().join(format!("stem_test_host_read_{}", crate::events::now_ms()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let file_path = tmp.join("test.txt");
+        std::fs::write(&file_path, "line1\nline2\nline3\nline4\nline5").unwrap();
+
+        let mut host = Host::new(
+            tmp.clone(),
+            crate::ui::Board::new(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Arc::new(AtomicBool::new(true)),
+            None,
+        );
+
+        // Entire file (no from/to)
+        let res = host.read(&json!({"path": "test.txt"})).unwrap();
+        assert_eq!(res, json!("line1\nline2\nline3\nline4\nline5"));
+
+        // Normal slice: lines 2 to 4
+        let res = host.read(&json!({"path": "test.txt", "from": 2, "to": 4})).unwrap();
+        assert_eq!(res, json!("line2\nline3\nline4"));
+
+        // Single line: line 3
+        let res = host.read(&json!({"path": "test.txt", "from": 3, "to": 3})).unwrap();
+        assert_eq!(res, json!("line3"));
+
+        // From line 4 to end (to: None)
+        let res = host.read(&json!({"path": "test.txt", "from": 4})).unwrap();
+        assert_eq!(res, json!("line4\nline5"));
+
+        // From beginning to line 2 (from: None)
+        let res = host.read(&json!({"path": "test.txt", "to": 2})).unwrap();
+        assert_eq!(res, json!("line1\nline2"));
+
+        // Beyond EOF
+        let res = host.read(&json!({"path": "test.txt", "from": 3, "to": 100})).unwrap();
+        assert_eq!(res, json!("line3\nline4\nline5"));
+
+        // start > total lines
+        let res = host.read(&json!({"path": "test.txt", "from": 10, "to": 20})).unwrap();
+        assert_eq!(res, json!(""));
+
+        // end < start (e.g. from: 4, to: 2)
+        let res = host.read(&json!({"path": "test.txt", "from": 4, "to": 2})).unwrap();
+        assert_eq!(res, json!(""));
+
+        // 0-based boundary (treated as 1)
+        let res = host.read(&json!({"path": "test.txt", "from": 0, "to": 1})).unwrap();
+        assert_eq!(res, json!("line1"));
+
+        // File with empty lines
+        let file_empty_lines = tmp.join("empty_lines.txt");
+        std::fs::write(&file_empty_lines, "\nline2\n\nline4\n").unwrap();
+        let res = host.read(&json!({"path": "empty_lines.txt", "from": 1, "to": 3})).unwrap();
+        assert_eq!(res, json!("\nline2\n"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_host_files_and_grep_optimizations() {
+        let tmp = std::env::temp_dir().join(format!("stem_test_host_fg_{}", crate::events::now_ms()));
+        let sub = tmp.join("src");
+        let _ = std::fs::create_dir_all(&sub);
+
+        std::fs::write(sub.join("a.rs"), "fn alpha() {\n    let val = 10;\n}\n").unwrap();
+        std::fs::write(sub.join("b.rs"), "fn beta() {\n    let val = 20;\n}\n").unwrap();
+        std::fs::write(sub.join("c.txt"), "no rust code here\n").unwrap();
+
+        let mut host = Host::new(
+            tmp.clone(),
+            crate::ui::Board::new(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Arc::new(AtomicBool::new(true)),
+            None,
+        );
+
+        // files with glob filtering
+        let res = host.files(&json!({"glob": "*.rs"})).unwrap();
+        let arr = res.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], "src/a.rs");
+        assert_eq!(arr[1], "src/b.rs");
+
+        // files with max limit
+        let res = host.files(&json!({"glob": "*.rs", "max": 1})).unwrap();
+        let arr = res.as_array().unwrap();
+        assert_eq!(arr.len(), 2); // 1 file + 1 overflow string
+        assert!(arr[0] == "src/a.rs" || arr[0] == "src/b.rs");
+        assert!(arr[1].as_str().unwrap().contains("more files not listed"));
+
+        // grep across files
+        let res = host.grep(&json!({"pattern": "let val" })).unwrap();
+        let arr = res.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        let files: std::collections::HashSet<_> = arr.iter().map(|r| r["file"].as_str().unwrap()).collect();
+        assert!(files.contains("src/a.rs"));
+        assert!(files.contains("src/b.rs"));
+        for r in arr {
+            assert_eq!(r["line"], 2);
+            assert!(r["text"].as_str().unwrap().starts_with("let val = "));
+        }
+
+        // grep with glob filter
+        let res = host.grep(&json!({"pattern": "let val", "glob": "src/a.rs"})).unwrap();
+        let arr = res.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["file"], "src/a.rs");
+
+        // grep with max limit
+        let res = host.grep(&json!({"pattern": "let val", "max": 1})).unwrap();
+        let arr = res.as_array().unwrap();
+        assert_eq!(arr.len(), 2); // 1 match + 1 overflow row
+        assert!(arr[0]["file"] == "src/a.rs" || arr[0]["file"] == "src/b.rs");
+        assert_eq!(arr[1]["file"], "…");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
