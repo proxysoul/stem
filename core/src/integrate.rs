@@ -111,6 +111,33 @@ export default function (pi: ExtensionAPI) {
 }
 "#;
 
+const OMP_EXTENSION: &str = r#"import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent"
+
+const hook = async (event: string, ctx: ExtensionContext, fields: object): Promise<string | undefined> => {
+  try {
+    const input = JSON.stringify({ session_id: `omp-${ctx.sessionManager.getSessionId()}`, cwd: ctx.cwd, ...fields })
+    const proc = Bun.spawn(["stem", "hook", event], { cwd: ctx.cwd, stdin: new Blob([input]), stdout: "pipe", stderr: "ignore", timeout: 60_000, env: { ...process.env, STEM_YOLO: "0" } })
+    const out = await new Response(proc.stdout).text()
+    return (await proc.exited) === 0 && out ? JSON.parse(out)?.hookSpecificOutput?.additionalContext : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export default function (pi: ExtensionAPI) {
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (ctx.agent.kind === "sub") return
+    const note = await hook("prompt", ctx, { prompt: event.prompt })
+    if (note) return { message: { customType: "stem", content: note, display: false } }
+  })
+  pi.on("agent_end", async (event, ctx) => {
+    const last = event.messages.findLast(m => m.role === "assistant")
+    if (ctx.agent.kind === "sub" || event.willContinue || last?.role !== "assistant" || last.stopReason === "aborted" || last.stopReason === "error") return
+    await hook("stop", ctx, { last_assistant_message: last.content.flatMap(c => (c.type === "text" ? [c.text] : [])).join("\n") })
+  })
+}
+"#;
+
 fn hook_entry(event: &str) -> Value {
     let (command, timeout) = if event == "UserPromptSubmit" { (PROMPT_HOOK, 30) } else { (STOP_HOOK, 60) };
     json!({"hooks": [{"type": "command", "command": command, "timeout": timeout}]})
@@ -222,13 +249,18 @@ fn target(root: &Path, name: &str) -> Vec<Result<String, String>> {
             write_file(&p(".pi/extensions/stem.ts"), &PI_EXTENSION.replace("MCP_TOOLS_LIST", MCP_TOOLS).replace("DESCRIPTION_TEXT", DESCRIPTION)),
             write_file(&p(".agents/skills/stem/SKILL.md"), SKILL),
         ],
-        other => vec![Err(format!("unknown harness {other}; use claude, codex, opencode, pi, empryo or all"))],
+        "omp" => vec![
+            write_file(&p(".omp/extensions/stem.ts"), OMP_EXTENSION),
+            add_mcp_object(&p(".omp/mcp.json"), "mcpServers", stdio_entry()),
+            write_file(&p(".agents/skills/stem/SKILL.md"), SKILL),
+        ],
+        other => vec![Err(format!("unknown harness {other}; use claude, codex, opencode, pi, omp, empryo or all"))],
     }
 }
 
 pub fn run(rest: &[String], root: &Path) -> i32 {
     let names: Vec<&str> = match rest.first().map(String::as_str) {
-        None | Some("all") => vec!["claude", "codex", "opencode", "pi", "empryo"],
+        None | Some("all") => vec!["claude", "codex", "opencode", "pi", "omp", "empryo"],
         Some(_) => rest.iter().map(String::as_str).collect(),
     };
     let mut failed = false;
@@ -243,6 +275,6 @@ pub fn run(rest: &[String], root: &Path) -> i32 {
             }
         }
     }
-    println!("\nEach harness now asks Stem what it knows when you send a request, and Stem learns from the git diff when the reply ends. Codex runs project hooks only after you trust them once with /hooks, and pi loads project extensions only after you trust the project. Stem's js tool is pre-approved in Codex because, with no one at Stem's keyboard, Stem refuses destructive steps (deleting files, git reset, push, publishing) instead of running them.");
+    println!("\nEach harness now asks Stem what it knows when you send a request, and Stem learns from the git diff when the reply ends. Codex runs project hooks only after you trust them once with /hooks, pi loads project extensions only after you trust the project, and omp loads them with no trust prompt. Stem's js tool is pre-approved in Codex because, with no one at Stem's keyboard, Stem refuses destructive steps (deleting files, git reset, push, publishing) instead of running them.");
     i32::from(failed)
 }

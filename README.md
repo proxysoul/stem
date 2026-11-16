@@ -43,7 +43,7 @@ Prebuilt for macOS, Linux and Windows, on x64 and arm64 (Windows from 0.4.0). On
 | `stem stats` | cost, tokens, scripts |
 | `stem js [file]` | run a script against `$`, no model |
 | `stem mcp` | serve Stem over MCP: `js`, `brief`, `remember`, `feedback` |
-| `stem integrate [harness]` | plug Stem into Claude Code, Codex, OpenCode, pi, Empryo |
+| `stem integrate [harness]` | plug Stem into Claude Code, Codex, OpenCode, pi, omp, Empryo |
 
 | In the input | |
 |---|---|
@@ -55,7 +55,7 @@ Prebuilt for macOS, Linux and Windows, on x64 and arm64 (Windows from 0.4.0). On
 
 ## Inside other agents
 
-`stem integrate` (or one of `claude`, `codex`, `opencode`, `pi`, `empryo`) plugs Stem into the agent you already use, for this project, through each agent's own extension points:
+`stem integrate` (or one of `claude`, `codex`, `opencode`, `pi`, `omp`, `empryo`) plugs Stem into the agent you already use, for this project, through each agent's own extension points:
 
 | Harness | Tools (MCP, typed) | Before / after each request | Skill |
 |---|---|---|---|
@@ -63,6 +63,7 @@ Prebuilt for macOS, Linux and Windows, on x64 and arm64 (Windows from 0.4.0). On
 | Codex | `.codex/config.toml`, pre-approved | `.codex/hooks.json` (trust once with `/hooks`) | `.agents/skills/stem` |
 | OpenCode | `opencode.json` | plugin `.opencode/plugins/stem.ts` | `.opencode/skills/stem` |
 | pi | registered by the extension, exposed directly | extension `.pi/extensions/stem.ts` | `.agents/skills/stem` |
+| omp | `.omp/mcp.json` | extension `.omp/extensions/stem.ts` | `.agents/skills/stem` |
 | Empryo | `.empryo/config.json`, resident | `.empryo/hooks.json` | `.agents/skills/stem` |
 
 The agent gets real tools, each with an input and output schema: `defs`, `refs`, `callers`, `impls` (language servers), `symbols`, `diagnostics`, `sql` over symbols and git history, `js` (a script against `$`), `task` (Stem does a whole task with its own cheap model and returns the answer, changed files and cost) and `feedback`. Before each request it gets what Stem learned that applies; after each reply Stem learns from the git diff and the answer, whichever agent made the change.

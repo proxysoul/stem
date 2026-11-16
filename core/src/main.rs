@@ -64,8 +64,8 @@ const HELP: &str = "stem: a tiny coding engine that grows with your project
   stem doctor               show the model, key, project and language servers Stem picks
   stem tools                functions this project grew: uses, failures, age, and the dropped ones with why
   stem js [file]            run one script against $ (from the file or stdin) and print its result
-  stem mcp                  serve Stem over MCP (stdio) for Claude Code, Codex, OpenCode, Empryo, pi
-  stem integrate [harness]  wire Stem into claude, codex, opencode, pi, empryo (default: all) for this project
+  stem mcp                  serve Stem over MCP (stdio) for Claude Code, Codex, OpenCode, Empryo, pi, omp
+  stem integrate [harness]  wire Stem into claude, codex, opencode, pi, omp, empryo (default: all) for this project
   stem hook prompt|stop     lifecycle hook: reads the host's JSON on stdin; prompt prints what Stem knows, stop learns from the git diff
   stem login claude         sign in with your Claude plan (through Claude Code) and use it
   stem login claude-native  sign in with your Claude plan directly (no Claude Code needed); alias claude-n
