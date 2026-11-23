@@ -1,8 +1,8 @@
-use crate::servers::Lang;
 use rusqlite::{Connection, params, types::ValueRef};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Instant, UNIX_EPOCH};
 use tree_sitter_tags::{TagsConfiguration, TagsContext};
 
@@ -40,21 +40,27 @@ struct Parsed {
     refs: Vec<(String, String, i64)>,
 }
 
-fn configs() -> Vec<(Lang, &'static str, TagsConfiguration)> {
-    let ts_query = format!("{}\n{}", tree_sitter_javascript::TAGS_QUERY, tree_sitter_typescript::TAGS_QUERY);
-    let mut out = Vec::new();
-    let mut add = |lang: Lang, name: &'static str, language: tree_sitter::Language, tags: &str, locals: &str| {
-        if let Ok(c) = TagsConfiguration::new(language, tags, locals) {
-            out.push((lang, name, c));
-        }
-    };
-    add(Lang::TypeScript, "typescript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), &ts_query, tree_sitter_typescript::LOCALS_QUERY);
-    add(Lang::TypeScript, "tsx", tree_sitter_typescript::LANGUAGE_TSX.into(), &ts_query, tree_sitter_typescript::LOCALS_QUERY);
-    add(Lang::TypeScript, "javascript", tree_sitter_javascript::LANGUAGE.into(), tree_sitter_javascript::TAGS_QUERY, tree_sitter_javascript::LOCALS_QUERY);
-    add(Lang::Rust, "rust", tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::TAGS_QUERY, "");
-    add(Lang::Python, "python", tree_sitter_python::LANGUAGE.into(), tree_sitter_python::TAGS_QUERY, "");
-    add(Lang::Go, "go", tree_sitter_go::LANGUAGE.into(), tree_sitter_go::TAGS_QUERY, "");
-    out
+const GRAMMARS: [&str; 6] = ["typescript", "tsx", "javascript", "rust", "python", "go"];
+
+static CONFIGS: [OnceLock<Option<TagsConfiguration>>; GRAMMARS.len()] = [const { OnceLock::new() }; GRAMMARS.len()];
+
+fn compile(grammar: &str) -> Option<TagsConfiguration> {
+    let ts_query = || format!("{}\n{}", tree_sitter_javascript::TAGS_QUERY, tree_sitter_typescript::TAGS_QUERY);
+    match grammar {
+        "typescript" => TagsConfiguration::new(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), &ts_query(), tree_sitter_typescript::LOCALS_QUERY),
+        "tsx" => TagsConfiguration::new(tree_sitter_typescript::LANGUAGE_TSX.into(), &ts_query(), tree_sitter_typescript::LOCALS_QUERY),
+        "javascript" => TagsConfiguration::new(tree_sitter_javascript::LANGUAGE.into(), tree_sitter_javascript::TAGS_QUERY, tree_sitter_javascript::LOCALS_QUERY),
+        "rust" => TagsConfiguration::new(tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::TAGS_QUERY, ""),
+        "python" => TagsConfiguration::new(tree_sitter_python::LANGUAGE.into(), tree_sitter_python::TAGS_QUERY, ""),
+        "go" => TagsConfiguration::new(tree_sitter_go::LANGUAGE.into(), tree_sitter_go::TAGS_QUERY, ""),
+        _ => return None,
+    }
+    .ok()
+}
+
+fn config(grammar: &str) -> Option<&'static TagsConfiguration> {
+    let index = GRAMMARS.iter().position(|g| *g == grammar)?;
+    CONFIGS[index].get_or_init(|| compile(grammar)).as_ref()
 }
 
 fn grammar_for(path: &Path) -> Option<&'static str> {
@@ -73,7 +79,7 @@ fn line_of(starts: &[usize], offset: usize) -> i64 {
     (starts.partition_point(|s| *s <= offset)) as i64
 }
 
-fn parse(path: &Path, rel: String, grammar: &'static str, configs: &[(Lang, &'static str, TagsConfiguration)], ctx: &mut TagsContext, size: i64, mtime: i64) -> Parsed {
+fn parse(path: &Path, rel: String, grammar: &'static str, ctx: &mut TagsContext, size: i64, mtime: i64) -> Parsed {
     let mut parsed = Parsed { path: rel, lang: grammar, size, mtime, lines: 0, defs: Vec::new(), refs: Vec::new() };
     let Ok(source) = std::fs::read(path) else { return parsed };
     let starts: Vec<usize> = std::iter::once(0).chain(source.iter().enumerate().filter(|(_, b)| **b == b'\n').map(|(i, _)| i + 1)).collect();
@@ -81,7 +87,7 @@ fn parse(path: &Path, rel: String, grammar: &'static str, configs: &[(Lang, &'st
     if source.len() > 2_000_000 {
         return parsed;
     }
-    let Some((_, _, config)) = configs.iter().find(|(_, g, _)| *g == grammar) else { return parsed };
+    let Some(config) = config(grammar) else { return parsed };
     let Ok((tags, _)) = ctx.generate_tags(config, &source, None) else { return parsed };
     for tag in tags.flatten() {
         let name = String::from_utf8_lossy(&source[tag.name_range.clone()]).into_owned();
@@ -140,9 +146,8 @@ impl Facts {
                 .chunks(chunk)
                 .map(|part| {
                     scope.spawn(move || {
-                        let configs = configs();
                         let mut ctx = TagsContext::new();
-                        part.iter().map(|(p, rel, g, size, mtime)| parse(p, rel.clone(), g, &configs, &mut ctx, *size, *mtime)).collect::<Vec<_>>()
+                        part.iter().map(|(p, rel, g, size, mtime)| parse(p, rel.clone(), g, &mut ctx, *size, *mtime)).collect::<Vec<_>>()
                     })
                 })
                 .collect();
